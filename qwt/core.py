@@ -6,12 +6,13 @@ for generating compensation blocks that reduce quantization error through
 learned linear transformations.
 """
 
+import logging
+from typing import Dict, Tuple
+
 import torch
 import torch.nn as nn
 import torch.distributed as dist
-from typing import Dict, Tuple, Optional
 from tqdm import tqdm
-import logging
 
 from .compensation import CompensationBlock
 
@@ -25,21 +26,21 @@ LINEAR_COMPENSATION_SAMPLES = 512
 
 
 class FeatureDataset(torch.utils.data.Dataset):
-    """Dataset wrapper for feature tensors."""
+    """Dataset wrapper for feature tensors (supports list of tensors/tuples)."""
     
-    def __init__(self, X: torch.Tensor):
-        self.X = X
+    def __init__(self, data_list):
+        self.data_list = data_list
     
     def __len__(self) -> int:
-        return len(self.X)
+        return len(self.data_list)
     
-    def __getitem__(self, idx: int) -> torch.Tensor:
-        return self.X[idx]
+    def __getitem__(self, idx: int):
+        return self.data_list[idx]
 
 
 def enable_quant(module: nn.Module) -> None:
     """Enable quantization for all quantized layers in a module."""
-    from ..quantization.quant_modules import QuantConv2d, QuantLinear, QuantMatMul
+    from quantization.quant_modules import QuantConv2d, QuantLinear, QuantMatMul
     for _, m in module.named_modules():
         if isinstance(m, (QuantConv2d, QuantLinear, QuantMatMul)):
             m.set_quant_state(True, True)
@@ -47,7 +48,7 @@ def enable_quant(module: nn.Module) -> None:
 
 def disable_quant(module: nn.Module) -> None:
     """Disable quantization for all quantized layers in a module."""
-    from ..quantization.quant_modules import QuantConv2d, QuantLinear, QuantMatMul
+    from quantization.quant_modules import QuantConv2d, QuantLinear, QuantMatMul
     for _, m in module.named_modules():
         if isinstance(m, (QuantConv2d, QuantLinear, QuantMatMul)):
             m.set_quant_state(False, False)
@@ -144,7 +145,8 @@ def generate_compensation_model(
     train_loader: torch.utils.data.DataLoader,
     device: str = 'cuda',
     world_size: int = 1,
-    num_samples: int = LINEAR_COMPENSATION_SAMPLES
+    num_samples: int = LINEAR_COMPENSATION_SAMPLES,
+    batch_size: int = 1
 ) -> Tuple[nn.Module, Dict[str, list]]:
     """Generate QwT compensation model for quantized network.
     
@@ -162,19 +164,19 @@ def generate_compensation_model(
         device: Device to use ('cpu' or 'cuda')
         world_size: Number of processes (for distributed training)
         num_samples: Number of samples for calibration
-    
-    Returns:
-        q_model: Model with CompensationBlocks inserted
-        losses: Dictionary with 'before' and 'after' losses per block
+        batch_size: Batch size for internal dataloaders
     """
-    logger.info('Starting QwT compensation model generation')
+    logger.info("Starting QwT compensation model generation")
+    
+    losses = {'before': [], 'after': []}
+    global_block_id = 0
+    
     q_model.eval()
     q_model.to(device)
     
     # Step 1: Extract features from patch embedding
     output_t = []
     sample_count = 0
-    H, W = None, None
     
     logger.info("Collecting patch embedding outputs...")
     for i, (image, target) in enumerate(tqdm(train_loader, desc="Patch Embed")):
@@ -183,11 +185,12 @@ def generate_compensation_model(
         # Run patch embed
         x = q_model.patch_embed(image)
         
-        # MMDetection PatchEmbed returns (x, H, W) tuple
+        # MMDetection PatchEmbed returns (x, (H, W)) tuple
+        H, W = None, None
         if isinstance(x, tuple):
-            x = x[0]
+            x, (H, W) = x
         
-        # Get feature map size
+        # Get feature map size if not returned
         if H is None:
             if hasattr(q_model.patch_embed, 'grid_size'):
                 H, W = q_model.patch_embed.grid_size
@@ -204,20 +207,21 @@ def generate_compensation_model(
                     patch_size = (patch_size, patch_size)
                 H = image.shape[2] // patch_size[0]
                 W = image.shape[3] // patch_size[1]
-            logger.info(f"Feature map size: {H}x{W}")
         
-        output_t.append(x.detach().cpu())
+        # Store as (tensor, (H, W))
+        # x is (B, L, C)
+        output_t.append((x.detach().cpu(), (H, W)))
         sample_count += image.size(0)
         if sample_count >= num_samples:
             break
     
-    output_t = torch.cat(output_t, dim=0)
+    # Do NOT concatenate output_t, keep as list
     output_previous = output_t
     
     # Create dataset for features
     feature_set = FeatureDataset(output_previous)
     
-    # Get layer list (timm uses 'layers', MMDetection uses 'stages')
+    # Identify layers
     if hasattr(q_model, 'layers'):
         layers_list = q_model.layers
         logger.info(f"Using 'layers' attribute ({len(layers_list)} layers)")
@@ -225,15 +229,11 @@ def generate_compensation_model(
         layers_list = q_model.stages
         logger.info(f"Using 'stages' attribute ({len(layers_list)} stages)")
     else:
-        raise AttributeError("Model has neither 'layers' nor 'stages' attribute")
-    
-    global_block_id = 0
-    losses = {'before': [], 'after': []}
-    
-    # Step 2: Process each layer
+        raise AttributeError("Could not find 'layers' or 'stages' in model")
+
+    # Step 2: Iterate through layers
     for layer_id, layer in enumerate(layers_list):
         logger.info(f"Processing Layer {layer_id}")
-        logger.info(f"  Current H, W: {H}, {W}")
         
         # Apply downsample from previous layer BEFORE processing current layer blocks
         if layer_id > 0:
@@ -245,11 +245,13 @@ def generate_compensation_model(
                 ds_dataset = FeatureDataset(output_previous)
                 ds_loader = torch.utils.data.DataLoader(
                     ds_dataset,
-                    batch_size=train_loader.batch_size
+                    batch_size=batch_size, # batch_size=1 usually
+                    collate_fn=lambda x: x[0] # Custom collate to return (tensor, (H, W)) directly
                 )
                 
-                for t_out in ds_loader:
+                for t_out, (H, W) in ds_loader:
                     t_out = t_out.to(device)
+                    H, W = int(H), int(W)
                     
                     # Reshape for downsample input
                     if len(t_out.shape) == 3:
@@ -278,21 +280,21 @@ def generate_compensation_model(
                         B, H_new, W_new, C_new = out.shape
                         out = out.view(B, -1, C_new)
                     
-                    output_downsampled_list.append(out.detach().cpu())
+                    # Update H, W
+                    H_new, W_new = (H + 1) // 2, (W + 1) // 2
+                    output_downsampled_list.append((out.detach().cpu(), (H_new, W_new)))
                 
-                output_previous = torch.cat(output_downsampled_list, dim=0)
-                H, W = (H + 1) // 2, (W + 1) // 2
-                logger.info(f"  After downsample: H={H}, W={W}, shape={output_previous.shape}")
+                output_previous = output_downsampled_list
                 
                 # Update feature set
-                feature_set.X = output_previous
+                feature_set.data_list = output_previous
         
         # Step 3: Process blocks in the layer
         for block_id, block in enumerate(layer.blocks):
             logger.info(f"  Processing Block {block_id} (Global {global_block_id})")
             
             # Determine dimensions
-            dummy_input = output_previous[0].to(device)
+            dummy_input = output_previous[0][0].to(device)
             C_block = dummy_input.shape[-1]
             
             # Initialize accumulators for linear regression
@@ -302,20 +304,22 @@ def generate_compensation_model(
             sum_Y = torch.zeros(C_block, device=device)
             
             # Create loader for current block
-            feature_set.X = output_previous
+            feature_set.data_list = output_previous
             feature_loader = torch.utils.data.DataLoader(
                 feature_set,
-                batch_size=train_loader.batch_size,
+                batch_size=batch_size,
                 shuffle=False,
-                num_workers=0
+                num_workers=0,
+                collate_fn=lambda x: x[0]
             )
             
             loss_before_accum = 0.0
             total_samples = 0
             
             # Pass 1: Accumulate statistics for linear regression
-            for i, t_out in enumerate(tqdm(feature_loader, desc=f"Block {global_block_id} Stats", leave=False)):
+            for i, (t_out, (H, W)) in enumerate(tqdm(feature_loader, desc=f"Block {global_block_id} Stats", leave=False)):
                 t_out = t_out.to(device)
+                H, W = int(H), int(W)
                 
                 # Reshape to 3D and 4D
                 if len(t_out.shape) == 4:
@@ -406,8 +410,9 @@ def generate_compensation_model(
             total_samples_after = 0
             output_previous_list = []
             
-            for i, t_out in enumerate(feature_loader):
+            for i, (t_out, (H, W)) in enumerate(feature_loader):
                 t_out = t_out.to(device)
+                H, W = int(H), int(W)
                 
                 # Reshape
                 if len(t_out.shape) == 4:
@@ -464,14 +469,14 @@ def generate_compensation_model(
                         compensated_out.shape[0], -1, compensated_out.shape[-1]
                     )
                 
-                output_previous_list.append(compensated_out.detach().cpu())
+                output_previous_list.append((compensated_out.detach().cpu(), (H, W)))
             
             loss_after = loss_after_accum / total_samples_after
             losses['after'].append(loss_after)
             reduction = (1 - loss_after/loss_before) * 100 if loss_before > 0 else 0
             logger.info(f'    abs_after={loss_after:.6f}, reduction={reduction:.2f}%')
             
-            output_previous = torch.cat(output_previous_list, dim=0)
+            output_previous = output_previous_list
             global_block_id += 1
             
             # Clean up

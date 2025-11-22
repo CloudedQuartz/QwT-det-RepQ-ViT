@@ -5,38 +5,60 @@ This module provides quantized versions of Conv2d, Linear, and MatMul operations
 with configurable quantization parameters for both weights and activations.
 """
 
+from copy import deepcopy
+from typing import Optional, Dict, Any
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.nn import Parameter
-from copy import deepcopy
 
 from .quantizer import UniformQuantizer, LogSqrt2Quantizer
 
 
 class QuantConv2d(nn.Conv2d):
     """
-    Class to quantize weights of given convolutional layer
+    Quantized Conv2d layer.
+    
+    Args:
+        in_channels (int): Number of channels in the input image
+        out_channels (int): Number of channels produced by the convolution
+        kernel_size (int or tuple): Size of the convolving kernel
+        stride (int or tuple, optional): Stride of the convolution. Default: 1
+        padding (int or tuple, optional): Zero-padding added to both sides of the input. Default: 0
+        dilation (int or tuple, optional): Spacing between kernel elements. Default: 1
+        groups (int, optional): Number of blocked connections from input channels to output channels. Default: 1
+        bias (bool, optional): If ``True``, adds a learnable bias to the output. Default: ``True``
+        input_quant_params (dict, optional): Parameters for input quantization. Default: None
+        weight_quant_params (dict, optional): Parameters for weight quantization. Default: None
     """
-    def __init__(self,   
-                in_channels,
-                out_channels,
-                kernel_size,
-                stride=1,
-                padding=0,
-                dilation=1,
-                groups=1,
-                bias=True,
-                input_quant_params={},
-                weight_quant_params={}):
-        super(QuantConv2d, self).__init__(in_channels=in_channels,
-                                          out_channels=out_channels,
-                                          kernel_size=kernel_size,
-                                          stride=stride,
-                                          padding=padding,
-                                          dilation=dilation,
-                                          groups=groups,
-                                          bias=bias)
+    def __init__(
+        self,   
+        in_channels: int,
+        out_channels: int,
+        kernel_size: Any,
+        stride: Any = 1,
+        padding: Any = 0,
+        dilation: Any = 1,
+        groups: int = 1,
+        bias: bool = True,
+        input_quant_params: Optional[Dict] = None,
+        weight_quant_params: Optional[Dict] = None
+    ):
+        super().__init__(
+            in_channels=in_channels,
+            out_channels=out_channels,
+            kernel_size=kernel_size,
+            stride=stride,
+            padding=padding,
+            dilation=dilation,
+            groups=groups,
+            bias=bias
+        )
+
+        if input_quant_params is None:
+            input_quant_params = {}
+        if weight_quant_params is None:
+            weight_quant_params = {}
 
         self.input_quantizer = UniformQuantizer(**input_quant_params)
         self.weight_quantizer = UniformQuantizer(**weight_quant_params)
@@ -45,18 +67,16 @@ class QuantConv2d(nn.Conv2d):
         self.use_weight_quant = False
 
     def __repr__(self):
-        s = super(QuantConv2d, self).__repr__()
-        s = "(" + s + "input_quant={}, weight_quant={})".format(self.use_input_quant, self.use_weight_quant)
-        return s
+        s = super().__repr__()
+        return f"({s}input_quant={self.use_input_quant}, weight_quant={self.use_weight_quant})"
 
-    def set_quant_state(self, input_quant=False, weight_quant=False):
+    def set_quant_state(self, input_quant: bool = False, weight_quant: bool = False):
+        """Set quantization state for input and weight."""
         self.use_input_quant = input_quant
         self.use_weight_quant = weight_quant
 
-    def forward(self, x):
-        """
-        using quantized weights to forward input x
-        """
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Forward pass with optional quantization."""
         if self.use_input_quant:
             x = self.input_quantizer(x)
 
@@ -80,14 +100,29 @@ class QuantConv2d(nn.Conv2d):
 
 class QuantLinear(nn.Linear):
     """
-    Class to quantize weights of given Linear layer
+    Quantized Linear layer.
+    
+    Args:
+        in_features (int): Size of each input sample
+        out_features (int): Size of each output sample
+        bias (bool, optional): If set to ``False``, the layer will not learn an additive bias. Default: ``True``
+        input_quant_params (dict, optional): Parameters for input quantization. Default: None
+        weight_quant_params (dict, optional): Parameters for weight quantization. Default: None
     """
-    def __init__(self,
-                 in_features,
-                 out_features,
-                 input_quant_params={},
-                 weight_quant_params={}):
-        super(QuantLinear, self).__init__(in_features, out_features)
+    def __init__(
+        self,
+        in_features: int,
+        out_features: int,
+        input_quant_params: Optional[Dict] = None,
+        weight_quant_params: Optional[Dict] = None,
+        bias: bool = True
+    ):
+        super().__init__(in_features, out_features, bias=bias)
+
+        if input_quant_params is None:
+            input_quant_params = {}
+        if weight_quant_params is None:
+            weight_quant_params = {}
 
         self.input_quantizer = UniformQuantizer(**input_quant_params)
         self.weight_quantizer = UniformQuantizer(**weight_quant_params)
@@ -96,19 +131,16 @@ class QuantLinear(nn.Linear):
         self.use_weight_quant = False
 
     def __repr__(self):
-        s = super(QuantLinear, self).__repr__()
-        s = "(" + s + "input_quant={}, weight_quant={})".format(self.use_input_quant, self.use_weight_quant)
-        return s
+        s = super().__repr__()
+        return f"({s}input_quant={self.use_input_quant}, weight_quant={self.use_weight_quant})"
 
-    def set_quant_state(self, input_quant=False, weight_quant=False):
+    def set_quant_state(self, input_quant: bool = False, weight_quant: bool = False):
+        """Set quantization state for input and weight."""
         self.use_input_quant = input_quant
         self.use_weight_quant = weight_quant
 
-    def forward(self, x):
-        """
-        using quantized weights to forward input x
-        """
-
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Forward pass with optional quantization."""
         if self.use_input_quant:
             x = self.input_quantizer(x)
 
@@ -124,11 +156,16 @@ class QuantLinear(nn.Linear):
 
 class QuantMatMul(nn.Module):
     """
-    Class to quantize weights of given Linear layer
+    Quantized Matrix Multiplication module.
+    
+    Args:
+        input_quant_params (dict, optional): Parameters for input quantization. Default: None
     """
-    def __init__(self,
-                 input_quant_params={}):
-        super(QuantMatMul, self).__init__()
+    def __init__(self, input_quant_params: Optional[Dict] = None):
+        super().__init__()
+
+        if input_quant_params is None:
+            input_quant_params = {}
 
         input_quant_params_matmul = deepcopy(input_quant_params)
         if 'log_quant' in input_quant_params_matmul:
@@ -141,14 +178,15 @@ class QuantMatMul(nn.Module):
         self.use_input_quant = False
 
     def __repr__(self):
-        s = super(QuantMatMul, self).__repr__()
-        s = "(" + s + "input_quant={})".format(self.use_input_quant)
-        return s
+        s = super().__repr__()
+        return f"({s}input_quant={self.use_input_quant})"
 
-    def set_quant_state(self, input_quant=False, weight_quant=False):
+    def set_quant_state(self, input_quant: bool = False, weight_quant: bool = False):
+        """Set quantization state for input."""
         self.use_input_quant = input_quant
 
-    def forward(self, A, B):
+    def forward(self, A: torch.Tensor, B: torch.Tensor) -> torch.Tensor:
+        """Forward pass with optional quantization."""
         if self.use_input_quant:
             A = self.quantizer_A(A)
             B = self.quantizer_B(B)

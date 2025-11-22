@@ -5,13 +5,18 @@ This module implements the CompensationBlock that wraps quantized blocks
 and applies learned linear compensation to reduce quantization error.
 """
 
+import logging
+from typing import Optional, Tuple
+
 import torch
 import torch.nn as nn
-from typing import Optional, Tuple
+
+logger = logging.getLogger(__name__)
 
 
 class CompensationBlock(nn.Module):
-    """Wrapper block that applies linear compensation to reduce quantization error.
+    """
+    Wrapper block that applies linear compensation to reduce quantization error.
     
     The compensation is learned via linear regression during calibration:
         compensated_out = quantized_block(x) + x @ W_comp + b_comp
@@ -20,13 +25,13 @@ class CompensationBlock(nn.Module):
         ||full_precision_out - compensated_out||
     
     Args:
-        block: The quantized block to wrap
-        W: Weight matrix for compensation (C_in x C_out)
-        b: Bias vector for compensation (C_out,)
-        r2_score: R² score of the linear regression fit
-        linear_init: Whether linear regression initialization was used
-        block_id: Identifier for this block (for logging)
-        local_rank: Local rank for distributed training
+        block (nn.Module): The quantized block to wrap
+        W (torch.Tensor): Weight matrix for compensation (C_in x C_out)
+        b (torch.Tensor): Bias vector for compensation (C_out,)
+        r2_score (float): R² score of the linear regression fit
+        linear_init (bool, optional): Whether linear regression initialization was used. Default: True
+        block_id (int, optional): Identifier for this block (for logging). Default: 0
+        local_rank (int, optional): Local rank for distributed training. Default: 0
     """
     
     def __init__(
@@ -54,26 +59,27 @@ class CompensationBlock(nn.Module):
             self.lora_weight.data.copy_(W)
             self.lora_bias.data.copy_(b)
             if local_rank == 0:
-                print(f'block {block_id} using linear init')
+                logger.info(f'Block {block_id} using linear init (R²={r2_score:.3f})')
         else:
             nn.init.zeros_(self.lora_weight)
             nn.init.zeros_(self.lora_bias)
             if local_rank == 0:
-                print(f'block {block_id} using lora init')
+                logger.info(f'Block {block_id} using lora init (R²={r2_score:.3f})')
     
     def forward(
         self,
         x: torch.Tensor,
         hw_shape: Optional[Tuple[int, int]] = None
     ) -> torch.Tensor:
-        """Forward pass with compensation.
+        """
+        Forward pass with compensation.
         
         Args:
-            x: Input tensor
-            hw_shape: Optional (H, W) shape for attention blocks
+            x (torch.Tensor): Input tensor
+            hw_shape (tuple, optional): (H, W) shape for attention blocks
         
         Returns:
-            Compensated output tensor
+            torch.Tensor: Compensated output tensor
         """
         # Pass through the wrapped block
         if hw_shape is not None:

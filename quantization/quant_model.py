@@ -4,31 +4,50 @@ Model quantization for Swin Transformer backbones.
 This module replaces standard PyTorch layers with quantized versions:
 - Conv2d → QuantConv2d (with 8-bit input quantization for patch embedding)
 - Linear → QuantLinear (with channel-wise quantization for qkv, fc1, reduction)
-- WindowAttention → QuantWindowAttention (with QuantMatMul for attention operations)
+- WindowMSA → QuantWindowMSA (with QuantMatMul for attention operations)
 
-The quantization follows the RepQ-ViT approach for vision transformers.
+The quantization follows the RepQ-ViT approach for vision transformers,
+adapted for MMDetection's Swin Transformer implementation.
 """
+
+from copy import deepcopy
+from typing import Optional, Dict
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-from copy import deepcopy
-from typing import Optional, Tuple
 
-from timm.models.swin_transformer import WindowAttention
+# Import MMDetection's WindowMSA instead of timm's
+try:
+    from mmdet.models.backbones.swin import WindowMSA
+except ImportError:
+    # Fallback for older MMCV versions
+    from mmcv.cnn.bricks.transformer import WindowMSA
+
 from .quant_modules import QuantConv2d, QuantLinear, QuantMatMul
 
 
-class QuantWindowAttention(WindowAttention):
+class QuantWindowMSA(WindowMSA):
     """
-    Quantized WindowAttention that replaces matmuls with QuantMatMul.
-    Inherits from timm's WindowAttention to maintain compatibility.
+    Quantized WindowMSA that replaces matmuls with QuantMatMul.
+    Inherits from MMDetection's WindowMSA to maintain compatibility.
+    
+    Args:
+        input_quant_params (dict, optional): Parameters for input quantization. Default: None
+        weight_quant_params (dict, optional): Parameters for weight quantization. Default: None
     """
-    def __init__(self, *args, input_quant_params={}, weight_quant_params={}, **kwargs):
+    def __init__(
+        self, 
+        *args, 
+        input_quant_params: Optional[Dict] = None, 
+        weight_quant_params: Optional[Dict] = None, 
+        **kwargs
+    ):
         super().__init__(*args, **kwargs)
-        
-        # Force fused_attn to False to ensure we use the manual path with quantized matmuls
-        self.fused_attn = False
+
+        if input_quant_params is None:
+            input_quant_params = {}
+        if weight_quant_params is None:
+            weight_quant_params = {}
 
         # Initialize QuantMatMul modules
         # matmul1: q @ k.T
@@ -47,45 +66,90 @@ class QuantWindowAttention(WindowAttention):
         
         # qkv - channel-wise input quantization
         qkv_input_quant_params = deepcopy(input_quant_params)
-        qkv_input_quant_params['channel_wise'] = True  # Match the behavior in quant_model()
+        qkv_input_quant_params['channel_wise'] = True
         
-        self.qkv = QuantLinear(self.qkv.in_features, self.qkv.out_features, qkv_input_quant_params, weight_quant_params)
-        self.proj = QuantLinear(self.proj.in_features, self.proj.out_features, input_quant_params, weight_quant_params)
+        self.qkv = QuantLinear(
+            self.qkv.in_features, 
+            self.qkv.out_features, 
+            qkv_input_quant_params, 
+            weight_quant_params
+        )
+        self.proj = QuantLinear(
+            self.proj.in_features, 
+            self.proj.out_features, 
+            input_quant_params, 
+            weight_quant_params
+        )
 
-    def forward(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None, *args, **kwargs) -> torch.Tensor:
         """
         Forward pass with quantized matmuls.
+        
+        Args:
+            x (tensor): input features with shape of (num_windows*B, N, C)
+            mask (tensor | None): mask with shape of (num_windows, Wh*Ww, Wh*Ww)
         """
-        B_, N, C = x.shape
-        qkv = self.qkv(x).reshape(B_, N, 3, self.num_heads, -1).permute(2, 0, 3, 1, 4)
-        q, k, v = qkv.unbind(0)
+        B, N, C = x.shape
+        qkv = self.qkv(x).reshape(B, N, 3, self.num_heads,
+                                  C // self.num_heads).permute(2, 0, 3, 1, 4)
+        q, k, v = qkv[0], qkv[1], qkv[2]
 
-        # Manual attention path from timm (modified for quantization)
+        # Apply scale
         q = q * self.scale
         
         # Quantized MatMul 1: q @ k.transpose
-        # attn = q @ k.transpose(-2, -1)
         attn = self.matmul1(q, k.transpose(-2, -1))
         
-        attn = attn + self._get_rel_pos_bias()
+        # Add relative position bias
+        relative_position_bias = self.relative_position_bias_table[
+            self.relative_position_index.view(-1)].view(
+                self.window_size[0] * self.window_size[1],
+                self.window_size[0] * self.window_size[1],
+                -1)
+        relative_position_bias = relative_position_bias.permute(
+            2, 0, 1).contiguous()
+        attn = attn + relative_position_bias.unsqueeze(0)
+
+        # Apply mask if provided
         if mask is not None:
-            num_win = mask.shape[0]
-            attn = attn.view(-1, num_win, self.num_heads, N, N) + mask.unsqueeze(1).unsqueeze(0)
+            nW = mask.shape[0]
+            attn = attn.view(B // nW, nW, self.num_heads, N,
+                             N) + mask.unsqueeze(1).unsqueeze(0)
             attn = attn.view(-1, self.num_heads, N, N)
+        
         attn = self.softmax(attn)
         attn = self.attn_drop(attn)
         
         # Quantized MatMul 2: attn @ v
-        # x = attn @ v
         x = self.matmul2(attn, v)
 
-        x = x.transpose(1, 2).reshape(B_, N, -1)
+        x = x.transpose(1, 2).reshape(B, N, C)
         x = self.proj(x)
         x = self.proj_drop(x)
         return x
 
 
-def quant_model(model, input_quant_params={}, weight_quant_params={}):
+def quant_model(
+    model: nn.Module, 
+    input_quant_params: Optional[Dict] = None, 
+    weight_quant_params: Optional[Dict] = None
+) -> nn.Module:
+    """
+    Recursively replace layers with quantized versions.
+    
+    Args:
+        model: Model to quantize
+        input_quant_params: Parameters for input quantization
+        weight_quant_params: Parameters for weight quantization
+    
+    Returns:
+        Quantized model
+    """
+    if input_quant_params is None:
+        input_quant_params = {}
+    if weight_quant_params is None:
+        weight_quant_params = {}
+
     # input
     input_quant_params_embed = deepcopy(input_quant_params)
     input_quant_params_embed['n_bits'] = 8
@@ -110,7 +174,7 @@ def quant_model(model, input_quant_params={}, weight_quant_params={}):
         if isinstance(m, nn.Conv2d):
             # Embedding Layer
             idx = idx + 1 if idx != 0 else idx
-            if 'patch_embed' in name: # timm uses patch_embed
+            if 'patch_embed' in name:
                 new_m = QuantConv2d(
                     m.in_channels,
                     m.out_channels,
@@ -144,7 +208,7 @@ def quant_model(model, input_quant_params={}, weight_quant_params={}):
         elif isinstance(m, nn.Linear):
             # Linear Layer
             idx = idx + 1 if idx != 0 else idx
-            # timm naming: qkv, fc1, fc2, proj
+            # Channel-wise for qkv, fc1, reduction
             if 'qkv' in name or 'fc1' in name or 'reduction' in name:
                 new_m = QuantLinear(m.in_features, m.out_features, input_quant_params_channel, weight_quant_params) 
             else:   
@@ -154,24 +218,19 @@ def quant_model(model, input_quant_params={}, weight_quant_params={}):
                 new_m.bias.data = m.bias.data
             setattr(father_module, name[idx:], new_m)
             
-        elif isinstance(m, WindowAttention):
-            # Replace WindowAttention with QuantWindowAttention
+        elif isinstance(m, WindowMSA):
+            # Replace WindowMSA with QuantWindowMSA (MMDetection implementation)
             idx = idx + 1 if idx != 0 else idx
             
-            # Create new QuantWindowAttention
-            # We need to extract init args from the existing module
-            # timm stores them in member vars
-            new_m = QuantWindowAttention(
-                dim=m.dim,
+            # Create new QuantWindowMSA
+            new_m = QuantWindowMSA(
+                embed_dims=m.embed_dims,
                 num_heads=m.num_heads,
-                # head_dim might not be stored directly, but we can infer or use default
-                # In timm, head_dim is calculated. 
-                # We can pass window_size, qkv_bias, etc.
                 window_size=m.window_size,
                 qkv_bias=m.qkv.bias is not None,
-                attn_drop=m.attn_drop.p,
-                proj_drop=m.proj_drop.p,
-                # device/dtype?
+                qk_scale=None,  # Will use default
+                attn_drop_rate=m.attn_drop.p,
+                proj_drop_rate=m.proj_drop.p,
                 input_quant_params=input_quant_params,
                 weight_quant_params=weight_quant_params
             )
@@ -179,15 +238,13 @@ def quant_model(model, input_quant_params={}, weight_quant_params={}):
             # Copy weights and buffers
             new_m.load_state_dict(m.state_dict(), strict=False)
             
-            # Ensure fused_attn is False
-            new_m.fused_attn = False
-            
             setattr(father_module, name[idx:], new_m)
 
     return model
 
 
-def set_quant_state(model, input_quant=False, weight_quant=False):
+def set_quant_state(model: nn.Module, input_quant: bool = False, weight_quant: bool = False) -> None:
+    """Set quantization state for all quantized modules in the model."""
     for m in model.modules():
         if isinstance(m, (QuantConv2d, QuantLinear, QuantMatMul)):
             m.set_quant_state(input_quant, weight_quant)

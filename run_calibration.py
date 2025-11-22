@@ -20,20 +20,23 @@ Usage:
 
 import argparse
 import logging
-import torch
+import sys
 from pathlib import Path
+from typing import Optional, Dict, Generator
+
+import torch
+from mmengine.config import Config
+from mmengine.runner import Runner
 
 from config import QwTConfig
-from data import create_calibration_loader
 from quantization import quant_model, set_quant_state
 from qwt import generate_compensation_model
 from utils import (
-    load_mmdet_model,
-    save_warmup_state,
-    load_warmup_state,
-    run_warmup_pass,
     evaluate_mmdet_model,
-    print_evaluation_summary
+    load_warmup_state,
+    print_evaluation_summary,
+    run_warmup_pass,
+    save_warmup_state,
 )
 
 # Configure logging
@@ -44,7 +47,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def parse_args():
+def parse_args() -> argparse.Namespace:
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(
         description='QwT Calibration for MMDetection'
@@ -146,7 +149,106 @@ def parse_args():
         help='Skip quantized (no compensation) evaluation'
     )
     
-    return parser.parse_args()
+    args = parser.parse_args()
+
+    # Validate paths immediately
+    if not Path(args.config).exists():
+        logger.error(f"Config file not found: {args.config}")
+        sys.exit(1)
+    if not Path(args.checkpoint).exists():
+        logger.error(f"Checkpoint file not found: {args.checkpoint}")
+        sys.exit(1)
+    if not Path(args.coco_root).exists():
+        logger.error(f"COCO root directory not found: {args.coco_root}")
+        sys.exit(1)
+        
+    return args
+
+
+def build_runner(args: argparse.Namespace) -> Runner:
+    """Build MMDetection Runner from config."""
+    cfg = Config.fromfile(args.config)
+    
+    # Update data root
+    cfg.data_root = args.coco_root
+    
+    # Update test dataloader config to use the provided COCO root
+    if 'test_dataloader' in cfg:
+        cfg.test_dataloader.dataset.data_root = args.coco_root
+        cfg.test_dataloader.dataset.ann_file = 'annotations/instances_val2017.json'
+        cfg.test_dataloader.dataset.data_prefix = dict(img='val2017/')
+        
+        # Update batch size
+        cfg.test_dataloader.batch_size = args.batch_size
+        
+    # Update evaluators to point to the correct annotation file
+    if 'val_evaluator' in cfg:
+        if isinstance(cfg.val_evaluator, dict):
+            cfg.val_evaluator.ann_file = str(Path(args.coco_root) / 'annotations/instances_val2017.json')
+        elif isinstance(cfg.val_evaluator, list):
+            for eval_cfg in cfg.val_evaluator:
+                eval_cfg.ann_file = str(Path(args.coco_root) / 'annotations/instances_val2017.json')
+                
+    if 'test_evaluator' in cfg:
+        if isinstance(cfg.test_evaluator, dict):
+            cfg.test_evaluator.ann_file = str(Path(args.coco_root) / 'annotations/instances_val2017.json')
+        elif isinstance(cfg.test_evaluator, list):
+            for eval_cfg in cfg.test_evaluator:
+                eval_cfg.ann_file = str(Path(args.coco_root) / 'annotations/instances_val2017.json')
+
+    # Set work_dir
+    cfg.work_dir = args.output_dir
+    
+    # Set checkpoint
+    cfg.load_from = args.checkpoint
+    
+    # Build runner
+    runner = Runner.from_cfg(cfg)
+    
+    # Explicitly load checkpoint to ensure it's loaded before we start
+    if args.checkpoint:
+        runner.load_checkpoint(args.checkpoint)
+        
+    return runner
+
+
+def get_calibration_data(runner: Runner, num_samples: int, device: str) -> Generator[torch.Tensor, None, None]:
+    """Yield calibration data from runner's dataloader."""
+    dataloader = runner.test_dataloader
+    model = runner.model
+    
+    count = 0
+    for data in dataloader:
+        # Preprocess data using model's data_preprocessor
+        # This handles normalization, padding, and stacking
+        with torch.no_grad():
+            data = model.data_preprocessor(data, training=False)
+        
+        images = data['inputs']
+        yield images, None # targets not needed for calibration
+        
+        count += images.shape[0]
+        if count >= num_samples:
+            break
+
+
+def run_evaluation(
+    step_name: str,
+    model: torch.nn.Module,
+    config: QwTConfig,
+    skip: bool = False
+) -> Optional[Dict[str, float]]:
+    """Helper function to run evaluation and log results."""
+    if skip:
+        logger.info(f"{step_name}: Skipping evaluation\n")
+        return None
+        
+    logger.info(f"{step_name}: Evaluating...")
+    metrics = evaluate_mmdet_model(
+        model, config.coco_root, config.eval_samples, config.device
+    )
+    logger.info(f"✓ {step_name} box mAP: {metrics['bbox_mAP']:.3f}\n")
+    return metrics
 
 
 def main():
@@ -174,21 +276,22 @@ def main():
     logger.info("="*70)
     logger.info(f"\n{config}\n")
     
-    # Step 1: Load model
-    logger.info("Step 1: Loading MMDetection model...")
-    model = load_mmdet_model(config.model_config, config.checkpoint, config.device)
-    logger.info("✓ Model loaded successfully\n")
+    # Step 1: Build Runner and Load Model
+    logger.info("Step 1: Building MMDetection Runner...")
+    runner = build_runner(args)
+    model = runner.model
+    model.cfg = runner.cfg
+    model.to(config.device)
+    model.eval()
+    logger.info("✓ Runner built and model loaded\n")
     
     # Step 2: Baseline evaluation
-    baseline_metrics = None
-    if not args.skip_baseline:
-        logger.info("Step 2: Baseline Evaluation (FP32)...")
-        baseline_metrics = evaluate_mmdet_model(
-            model, config.coco_root, config.eval_samples, config.device
-        )
-        logger.info(f"✓ Baseline box mAP: {baseline_metrics['bbox_mAP']:.3f}\n")
-    else:
-        logger.info("Step 2: Skipping baseline evaluation\n")
+    baseline_metrics = run_evaluation(
+        "Step 2: Baseline Evaluation (FP32)",
+        model,
+        config,
+        skip=args.skip_baseline
+    )
     
     # Step 3: Quantize model
     logger.info(f"Step 3: Quantizing model (W{config.w_bit}/A{config.a_bit})...")
@@ -207,10 +310,9 @@ def main():
     logger.info("✓ Model quantized\n")
     
     # Step 4: Warmup quantization
-    warmup_path = config.warmup_path
-    if Path(warmup_path).exists():
-        logger.info(f"Step 4: Loading warmup state from {warmup_path}...")
-        load_warmup_state(q_backbone, warmup_path, config.device)
+    if config.warmup_checkpoint and Path(config.warmup_checkpoint).exists():
+        logger.info(f"Step 4: Loading warmup state from {config.warmup_checkpoint}...")
+        load_warmup_state(q_backbone, config.warmup_checkpoint, config.device)
         
         # Run warmup pass to initialize compiled graph
         dummy_input = torch.randn(1, 3, 800, 800).to(config.device)
@@ -218,53 +320,41 @@ def main():
         
         logger.info("✓ Warmup state loaded\n")
     else:
-        logger.info(f"Step 4: Warmup quantization ({config.calibration_samples} samples)...")
+        if config.warmup_checkpoint:
+            logger.warning(f"Warmup checkpoint {config.warmup_checkpoint} not found. Running warmup...")
         
-        # Create calibration loader
-        calib_loader = create_calibration_loader(
-            config.coco_root,
-            config.calibration_samples,
-            image_size=800,
-            batch_size=config.batch_size,
-            device=config.device
-        )
+        logger.info(f"Step 4: Warmup quantization ({config.calibration_samples} samples)...")
         
         # Warmup
         set_quant_state(q_backbone, input_quant=True, weight_quant=True)
-        for i, (images, _) in enumerate(calib_loader):
+        
+        # Use generator to get data
+        data_gen = get_calibration_data(runner, config.calibration_samples, config.device)
+        
+        for images, _ in data_gen:
             _ = q_backbone(images)
-            if (i + 1) * config.batch_size >= config.calibration_samples:
-                break
         
         # Save warmup state
         if config.save_warmup:
-            save_warmup_state(q_backbone, warmup_path)
+            save_path = config.warmup_path
+            save_warmup_state(q_backbone, save_path)
         
         logger.info("✓ Warmup complete\n")
     
     # Step 5: Evaluate quantized model (no compensation)
-    quantized_metrics = None
-    if not args.skip_quantized_eval:
-        logger.info("Step 5: Evaluating quantized model (no compensation)...")
-        set_quant_state(q_backbone, input_quant=True, weight_quant=True)
-        quantized_metrics = evaluate_mmdet_model(
-            model, config.coco_root, config.eval_samples, config.device
-        )
-        logger.info(f"✓ Quantized box mAP: {quantized_metrics['bbox_mAP']:.3f}\n")
-    else:
-        logger.info("Step 5: Skipping quantized evaluation\n")
+    quantized_metrics = run_evaluation(
+        "Step 5: Quantized Evaluation (No Compensation)",
+        model,
+        config,
+        skip=args.skip_quantized_eval
+    )
     
     # Step 6: Generate QwT compensation
     logger.info("Step 6: Generating QwT compensation...")
     
-    # Reload calibration loader
-    calib_loader = create_calibration_loader(
-        config.coco_root,
-        config.calibration_samples,
-        image_size=800,
-        batch_size=config.batch_size,
-        device=config.device
-    )
+    # Reload data generator
+    # Note: get_calibration_data re-iterates the dataloader
+    calib_loader = get_calibration_data(runner, config.calibration_samples, config.device)
     
     compensated_backbone, losses = generate_compensation_model(
         q_backbone,
@@ -277,15 +367,18 @@ def main():
     logger.info("✓ Compensation model generated\n")
     
     # Step 7: Evaluate QwT compensated model
-    logger.info("Step 7: Evaluating QwT compensated model...")
+    # Ensure quantization is enabled for compensated model
     set_quant_state(compensated_backbone, input_quant=True, weight_quant=True)
-    qwt_metrics = evaluate_mmdet_model(
-        model, config.coco_root, config.eval_samples, config.device
+    
+    qwt_metrics = run_evaluation(
+        "Step 7: QwT Compensated Evaluation",
+        model,
+        config,
+        skip=False # Always evaluate final model
     )
-    logger.info(f"✓ QwT box mAP: {qwt_metrics['bbox_mAP']:.3f}\n")
     
     # Print summary
-    if baseline_metrics and quantized_metrics:
+    if baseline_metrics and quantized_metrics and qwt_metrics:
         print_evaluation_summary(baseline_metrics, quantized_metrics, qwt_metrics)
     
     logger.info("="*70)

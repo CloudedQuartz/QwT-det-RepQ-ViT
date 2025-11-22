@@ -5,18 +5,16 @@ This module provides utilities for working with MMDetection models
 in the QwT calibration pipeline.
 """
 
+import logging
+from pathlib import Path
+from typing import Dict
+
 import torch
 import torch.nn as nn
 from mmdet.apis import init_detector, inference_detector
-from mmdet.evaluation import get_classes
 from pycocotools.coco import COCO
 from pycocotools.cocoeval import COCOeval
-from pathlib import Path
-from typing import Optional, Dict, List, Tuple
-import logging
-import numpy as np
 from tqdm import tqdm
-import json
 
 logger = logging.getLogger(__name__)
 
