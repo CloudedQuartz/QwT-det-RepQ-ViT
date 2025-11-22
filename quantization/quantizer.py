@@ -8,7 +8,6 @@ This module provides two quantization strategies:
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 import numpy as np
 
 
@@ -115,15 +114,30 @@ class UniformQuantizer(nn.Module):
             best_score = 1e+10
             for pct in [0.999, 0.9999, 0.99999]:
                 try:
-                    new_max = torch.quantile(x_clone.reshape(-1), pct)
-                    new_min = torch.quantile(x_clone.reshape(-1), 1.0 - pct)
+                    # Optimization: Downsample for large tensors on CPU
+                    if x_clone.numel() > 10000 and x_clone.device.type == 'cpu':
+                        # Random sampling for speed
+                        indices = torch.randperm(x_clone.numel())[:10000]
+                        sample = x_clone.reshape(-1)[indices]
+                        new_max = torch.quantile(sample, pct)
+                        new_min = torch.quantile(sample, 1.0 - pct)
+                    else:
+                        new_max = torch.quantile(x_clone.reshape(-1), pct)
+                        new_min = torch.quantile(x_clone.reshape(-1), 1.0 - pct)
                 except:
+                    # Fallback to numpy if torch.quantile fails or for other reasons
+                    if x_clone.numel() > 10000:
+                         indices = torch.randperm(x_clone.numel())[:10000]
+                         sample = x_clone.reshape(-1)[indices].cpu().numpy()
+                    else:
+                         sample = x_clone.reshape(-1).cpu().numpy()
+                         
                     new_max = torch.tensor(np.percentile(
-                        x_clone.reshape(-1).cpu(), pct * 100),
+                        sample, pct * 100),
                         device=x_clone.device,
                         dtype=torch.float32)
                     new_min = torch.tensor(np.percentile(
-                        x_clone.reshape(-1).cpu(), (1 - pct) * 100),
+                        sample, (1 - pct) * 100),
                         device=x_clone.device,
                         dtype=torch.float32)   
                 x_q = self.quantize(x_clone, new_max, new_min)
@@ -193,10 +207,21 @@ class LogSqrt2Quantizer(nn.Module):
         best_score = 1e+10
         for pct in [0.999, 0.9999, 0.99999]: #
             try:
-                new_delta = torch.quantile(x_clone.reshape(-1), pct)
+                if x_clone.numel() > 10000 and x_clone.device.type == 'cpu':
+                    indices = torch.randperm(x_clone.numel())[:10000]
+                    sample = x_clone.reshape(-1)[indices]
+                    new_delta = torch.quantile(sample, pct)
+                else:
+                    new_delta = torch.quantile(x_clone.reshape(-1), pct)
             except:
+                if x_clone.numel() > 10000:
+                     indices = torch.randperm(x_clone.numel())[:10000]
+                     sample = x_clone.reshape(-1)[indices].cpu().numpy()
+                else:
+                     sample = x_clone.reshape(-1).cpu().numpy()
+                     
                 new_delta = torch.tensor(np.percentile(
-                    x_clone.reshape(-1).cpu(), pct * 100),
+                    sample, pct * 100),
                     device=x_clone.device,
                     dtype=torch.float32)
             x_q = self.quantize(x_clone, new_delta)

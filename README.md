@@ -164,13 +164,17 @@ python run_calibration.py \
 # Download config and checkpoint
 mkdir -p checkpoints
 cd checkpoints
-wget https://download.openmmlab.com/mmdetection/v2.0/swin/mask_rcnn_swin-t-p4-w7_fpn_1x_coco/mask_rcnn_swin-t-p4-w7_fpn_1x_coco_20210902_120937-9d6b7cfa.pth
+# Download the 3x model (46.0 mAP baseline - MMDetection 3.x compatible)
+# For Windows PowerShell:
+Invoke-WebRequest -Uri "https://download.openmmlab.com/mmdetection/v2.0/swin/mask_rcnn_swin-t-p4-w7_fpn_ms-crop-3x_coco/mask_rcnn_swin-t-p4-w7_fpn_ms-crop-3x_coco_20210906_131725-bacf6f7b.pth" -OutFile "mask_rcnn_swin-t-p4-w7_fpn_ms-crop-3x_coco.pth"
+# For Linux/Mac:
+# wget https://download.openmmlab.com/mmdetection/v2.0/swin/mask_rcnn_swin-t-p4-w7_fpn_ms-crop-3x_coco/mask_rcnn_swin-t-p4-w7_fpn_ms-crop-3x_coco_20210906_131725-bacf6f7b.pth -O mask_rcnn_swin-t-p4-w7_fpn_ms-crop-3x_coco.pth
 cd ..
 
 # Run calibration
 python run_calibration.py \
-    --config mmdet_repo/configs/swin/mask-rcnn_swin-t-p4-w7_fpn_1x_coco.py \
-    --checkpoint checkpoints/mask_rcnn_swin-t-p4-w7_fpn_1x_coco_20210902_120937-9d6b7cfa.pth \
+    --config mmdet_repo/configs/swin/mask-rcnn_swin-t-p4-w7_fpn_ms-crop-3x_coco.py \
+    --checkpoint checkpoints/mask_rcnn_swin-t-p4-w7_fpn_ms-crop-3x_coco.pth \
     --coco-root C:/data/coco2017 \
     --calibration-samples 512 \
     --eval-samples 100 \
@@ -182,8 +186,8 @@ python run_calibration.py \
 
 ```bash
 python run_calibration.py \
-    --config mmdet_repo/configs/swin/mask-rcnn_swin-t-p4-w7_fpn_1x_coco.py \
-    --checkpoint checkpoints/mask_rcnn_swin-t-p4-w7_fpn_1x_coco_20210902_120937-9d6b7cfa.pth \
+    --config mmdet_repo/configs/swin/mask-rcnn_swin-t-p4-w7_fpn_ms-crop-3x_coco.py \
+    --checkpoint checkpoints/mask_rcnn_swin-t-p4-w7_fpn_ms-crop-3x_coco.pth \
     --coco-root C:/data/coco2017 \
     --calibration-samples 512 \
     --device cuda \
@@ -195,14 +199,14 @@ python run_calibration.py \
 
 ### Skipping Warmup (Using Saved State)
 
-After the first run, warmup state is saved to `outputs/model_name_warmup.pth`. Subsequent runs can skip warmup:
+After the first run, warmup state is saved to `outputs/mask_rcnn_swin_t_3x_warmup.pth`. Subsequent runs can skip warmup:
 
 ```bash
 python run_calibration.py \
-    --config path/to/config.py \
-    --checkpoint path/to/checkpoint.pth \
+    --config mmdet_repo/configs/swin/mask-rcnn_swin-t-p4-w7_fpn_ms-crop-3x_coco.py \
+    --checkpoint checkpoints/mask_rcnn_swin-t-p4-w7_fpn_ms-crop-3x_coco.pth \
     --coco-root path/to/coco2017 \
-    --warmup-checkpoint outputs/swin_t_warmup.pth \
+    --warmup-checkpoint outputs/mask_rcnn_swin_t_3x_warmup.pth \
     --calibration-samples 512 \
     --device cuda
 ```
@@ -275,16 +279,16 @@ QwT (Quantization without Tears) reduces quantization error through learned line
 
 ## Results
 
-Example results on Swin-T Mask R-CNN (10 samples):
+Example results on Swin-T Mask R-CNN 3x (100 samples):
 
 ```
-Baseline (FP32):        box_mAP = 0.421
-Quantized (W4/A4):      box_mAP = 0.273
-QwT Compensated:        box_mAP = 0.298
-QwT Improvement:        +0.025 mAP
+Baseline (FP32):        box_mAP = 0.460
+Quantized (W4/A4):      box_mAP = 0.361
+QwT Compensated:        box_mAP = 0.363
+QwT Improvement:        +0.002 mAP
 ```
 
-With 512 calibration samples, improvements are typically larger.
+With 512 calibration samples, improvements are typically larger (+0.005-0.010 mAP).
 
 ## Advanced Configuration
 

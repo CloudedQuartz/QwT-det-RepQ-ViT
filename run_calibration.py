@@ -19,6 +19,7 @@ Usage:
 """
 
 import argparse
+import copy
 import logging
 import sys
 from pathlib import Path
@@ -178,9 +179,12 @@ def build_runner(args: argparse.Namespace) -> Runner:
         cfg.test_dataloader.dataset.ann_file = 'annotations/instances_val2017.json'
         cfg.test_dataloader.dataset.data_prefix = dict(img='val2017/')
         
+        # Limit to eval_samples by using indices
+        cfg.test_dataloader.dataset.indices = list(range(args.eval_samples))
+        
         # Update batch size
         cfg.test_dataloader.batch_size = args.batch_size
-        
+
     # Update evaluators to point to the correct annotation file
     if 'val_evaluator' in cfg:
         if isinstance(cfg.val_evaluator, dict):
@@ -202,6 +206,9 @@ def build_runner(args: argparse.Namespace) -> Runner:
     # Set checkpoint
     cfg.load_from = args.checkpoint
     
+    # Suppress verbose logs
+    cfg.log_level = 'WARNING'
+    
     # Build runner
     runner = Runner.from_cfg(cfg)
     
@@ -212,24 +219,7 @@ def build_runner(args: argparse.Namespace) -> Runner:
     return runner
 
 
-def get_calibration_data(runner: Runner, num_samples: int, device: str) -> Generator[torch.Tensor, None, None]:
-    """Yield calibration data from runner's dataloader."""
-    dataloader = runner.test_dataloader
-    model = runner.model
-    
-    count = 0
-    for data in dataloader:
-        # Preprocess data using model's data_preprocessor
-        # This handles normalization, padding, and stacking
-        with torch.no_grad():
-            data = model.data_preprocessor(data, training=False)
-        
-        images = data['inputs']
-        yield images, None # targets not needed for calibration
-        
-        count += images.shape[0]
-        if count >= num_samples:
-            break
+
 
 
 def run_evaluation(
@@ -249,8 +239,7 @@ def run_evaluation(
     )
     logger.info(f"✓ {step_name} box mAP: {metrics['bbox_mAP']:.3f}\n")
     return metrics
-
-
+    
 def main():
     """Main calibration pipeline."""
     args = parse_args()
@@ -274,13 +263,16 @@ def main():
     logger.info("="*70)
     logger.info("QwT Calibration Pipeline - MMDetection")
     logger.info("="*70)
-    logger.info(f"\n{config}\n")
-    
     # Step 1: Build Runner and Load Model
     logger.info("Step 1: Building MMDetection Runner...")
+    
+    # Suppress MMEngine logs
+    logging.getLogger('mmengine').setLevel(logging.WARNING)
+    
     runner = build_runner(args)
     model = runner.model
     model.cfg = runner.cfg
+    model.runner = runner  # Attach runner for proper evaluation
     model.to(config.device)
     model.eval()
     logger.info("✓ Runner built and model loaded\n")
@@ -310,6 +302,7 @@ def main():
     logger.info("✓ Model quantized\n")
     
     # Step 4: Warmup quantization
+    warmup_path = config.warmup_path
     if config.warmup_checkpoint and Path(config.warmup_checkpoint).exists():
         logger.info(f"Step 4: Loading warmup state from {config.warmup_checkpoint}...")
         load_warmup_state(q_backbone, config.warmup_checkpoint, config.device)
@@ -325,19 +318,26 @@ def main():
         
         logger.info(f"Step 4: Warmup quantization ({config.calibration_samples} samples)...")
         
-        # Warmup
+        # Warmup - use test_dataloader for calibration
         set_quant_state(q_backbone, input_quant=True, weight_quant=True)
         
-        # Use generator to get data
-        data_gen = get_calibration_data(runner, config.calibration_samples, config.device)
-        
-        for images, _ in data_gen:
+        count = 0
+        for data_batch in runner.test_dataloader:
+            # Preprocess data
+            with torch.no_grad():
+                data = runner.model.data_preprocessor(data_batch, training=False)
+            images = data['inputs']
+            
+            # Run through quantized backbone
             _ = q_backbone(images)
+            
+            count += images.shape[0]
+            if count >= config.calibration_samples:
+                break
         
         # Save warmup state
         if config.save_warmup:
-            save_path = config.warmup_path
-            save_warmup_state(q_backbone, save_path)
+            save_warmup_state(q_backbone, warmup_path)
         
         logger.info("✓ Warmup complete\n")
     
@@ -352,9 +352,20 @@ def main():
     # Step 6: Generate QwT compensation
     logger.info("Step 6: Generating QwT compensation...")
     
-    # Reload data generator
-    # Note: get_calibration_data re-iterates the dataloader
-    calib_loader = get_calibration_data(runner, config.calibration_samples, config.device)
+    # Create calibration data generator using test_dataloader
+    def get_calib_data():
+        count = 0
+        for data_batch in runner.test_dataloader:
+            with torch.no_grad():
+                data = runner.model.data_preprocessor(data_batch, training=False)
+            images = data['inputs']
+            yield images, None
+            
+            count += images.shape[0]
+            if count >= config.calibration_samples:
+                break
+    
+    calib_loader = get_calib_data()
     
     compensated_backbone, losses = generate_compensation_model(
         q_backbone,

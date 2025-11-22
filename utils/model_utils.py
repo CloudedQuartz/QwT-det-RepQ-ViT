@@ -7,17 +7,18 @@ in the QwT calibration pipeline.
 
 import logging
 from pathlib import Path
-from typing import Dict
+from typing import Dict, List, Optional, Generator, Tuple
 
 import torch
 import torch.nn as nn
-from mmdet.apis import init_detector, inference_detector
-from pycocotools.coco import COCO
-from pycocotools.cocoeval import COCOeval
+import numpy as np
 from tqdm import tqdm
+from pycocotools.cocoeval import COCOeval
+
+from mmdet.apis import init_detector
+from mmengine.runner import Runner
 
 logger = logging.getLogger(__name__)
-
 
 def load_mmdet_model(
     config_path: str,
@@ -109,10 +110,10 @@ def evaluate_mmdet_model(
     num_samples: int = 100,
     device: str = 'cpu'
 ) -> Dict[str, float]:
-    """Evaluate MMDetection model on COCO dataset.
+    """Evaluate MMDetection model on COCO dataset using runner.
     
     Args:
-        model: Model to evaluate
+        model: Model to evaluate (must have runner attribute)
         coco_root: Path to COCO dataset root
         num_samples: Number of samples to evaluate on
         device: Device to run evaluation on
@@ -122,70 +123,137 @@ def evaluate_mmdet_model(
     """
     logger.info(f"Evaluating model on {num_samples} samples...")
     
-    coco_root = Path(coco_root)
-    ann_file = coco_root / 'annotations' / 'instances_val2017.json'
-    coco_gt = COCO(str(ann_file))
+    if not hasattr(model, 'runner'):
+        logger.error("Model does not have runner attribute")
+        return {
+            'bbox_mAP': 0.0, 'bbox_mAP_50': 0.0, 'bbox_mAP_75': 0.0,
+            'bbox_mAP_small': 0.0, 'bbox_mAP_medium': 0.0, 'bbox_mAP_large': 0.0
+        }
     
-    img_ids = list(coco_gt.imgs.keys())[:num_samples]
-    
-    results = []
+    runner = model.runner
     model.eval()
     
-    for img_id in tqdm(img_ids, desc="Evaluating"):
-        img_info = coco_gt.loadImgs(img_id)[0]
-        img_path = coco_root / 'val2017' / img_info['file_name']
+    # Collect results and image IDs
+    results = []
+    img_ids = []
+    count = 0
+    
+    # Get the COCO API from the evaluator
+    # We need to ensure the evaluator is initialized
+    if not hasattr(runner.test_evaluator.metrics[0], '_coco_api'):
+        runner.test_evaluator.metrics[0].dataset_meta = runner.test_dataloader.dataset.metainfo
+        # Trigger lazy init if needed, or manually load
+        # For now, assume it's initialized or we can access it via the dataset
+        pass
         
-        # Run inference
-        result = inference_detector(model, str(img_path))
-        
-        # Convert to COCO format
-        if hasattr(result, 'pred_instances'):
-            pred_instances = result.pred_instances.cpu()
-            bboxes = pred_instances.bboxes.numpy()
-            scores = pred_instances.scores.numpy()
-            labels = pred_instances.labels.numpy()
+    # Iterate through dataloader
+    for data_batch in tqdm(runner.test_dataloader, desc="Evaluating", total=num_samples):
+        with torch.no_grad():
+            outputs = runner.model.test_step(data_batch)
             
-            for bbox, score, label in zip(bboxes, scores, labels):
-                x1, y1, x2, y2 = bbox
-                w = x2 - x1
-                h = y2 - y1
+        for output in outputs:
+            img_id = output.img_id
+            img_ids.append(img_id)
+            
+            # Convert predictions to COCO format
+            pred_instances = output.pred_instances
+            scores = pred_instances.scores
+            bboxes = pred_instances.bboxes
+            labels = pred_instances.labels
+            
+            for i in range(len(scores)):
+                # COCO bbox format: [x, y, w, h]
+                bbox = bboxes[i].tolist()
+                x, y, x2, y2 = bbox
+                w = x2 - x
+                h = y2 - y
                 
                 results.append({
                     'image_id': img_id,
-                    'category_id': int(label) + 1,  # COCO 1-indexed
-                    'bbox': [float(x1), float(y1), float(w), float(h)],
-                    'score': float(score)
+                    'category_id': runner.test_dataloader.dataset.metainfo['classes'][labels[i].item()] if isinstance(labels[i].item(), str) else labels[i].item(), # Handle class mapping if needed, but usually label index matches if dataset is standard
+                    # Actually, MMDetection labels are 0-indexed, COCO category IDs are not contiguous.
+                    # We need to map label index to category ID.
+                    # runner.test_dataloader.dataset.metainfo['classes'] gives class names.
+                    # We need the category ID mapping.
+                    # The dataset object usually has cat_ids.
+                    'bbox': [x, y, w, h],
+                    'score': scores[i].item()
                 })
-    
-    # Run COCO evaluation
-    if results:
+        
+        count += len(outputs)
+        if count >= num_samples:
+            break
+            
+    # If no results, return 0
+    if not results:
+        return {
+            'bbox_mAP': 0.0, 'bbox_mAP_50': 0.0, 'bbox_mAP_75': 0.0,
+            'bbox_mAP_small': 0.0, 'bbox_mAP_medium': 0.0, 'bbox_mAP_large': 0.0
+        }
+        
+    # Perform COCO evaluation
+    try:
+        # Get COCO GT object
+        # Try to get it from the evaluator or dataset
+        if hasattr(runner.test_evaluator.metrics[0], '_coco_api'):
+            coco_gt = runner.test_evaluator.metrics[0]._coco_api
+        else:
+            # Fallback: load it manually (expensive but safe)
+            from pycocotools.coco import COCO
+            ann_file = runner.test_evaluator.metrics[0].ann_file
+            coco_gt = COCO(ann_file)
+            
+        # Map label indices to category IDs
+        # MMDetection dataset usually stores this mapping
+        dataset = runner.test_dataloader.dataset
+        if hasattr(dataset, 'cat_ids'):
+             cat_ids = dataset.cat_ids
+        else:
+             # Assume 1-based mapping if not found (standard COCO)
+             # But MMDetection usually handles this.
+             # Let's try to get it from coco_gt
+             cat_ids = coco_gt.getCatIds()
+             
+        # Update category IDs in results
+        # MMDetection output labels are 0-indexed indices into the classes list
+        # We need to map 0 -> cat_ids[0], 1 -> cat_ids[1], etc.
+        for res in results:
+            label_idx = res['category_id'] # This was the label index
+            if label_idx < len(cat_ids):
+                res['category_id'] = cat_ids[label_idx]
+            else:
+                # Fallback or error
+                pass
+
+        # Load results into COCO
         coco_dt = coco_gt.loadRes(results)
+        
+        # Run evaluation
         coco_eval = COCOeval(coco_gt, coco_dt, 'bbox')
         coco_eval.params.imgIds = img_ids
         coco_eval.evaluate()
         coco_eval.accumulate()
         coco_eval.summarize()
         
-        metrics = {
-            'bbox_mAP': coco_eval.stats[0],
-            'bbox_mAP_50': coco_eval.stats[1],
-            'bbox_mAP_75': coco_eval.stats[2],
-            'bbox_mAP_small': coco_eval.stats[3],
-            'bbox_mAP_medium': coco_eval.stats[4],
-            'bbox_mAP_large': coco_eval.stats[5]
+        # Extract metrics
+        metrics = coco_eval.stats
+        return {
+            'bbox_mAP': metrics[0],
+            'bbox_mAP_50': metrics[1],
+            'bbox_mAP_75': metrics[2],
+            'bbox_mAP_small': metrics[3],
+            'bbox_mAP_medium': metrics[4],
+            'bbox_mAP_large': metrics[5]
         }
-    else:
-        logger.warning("No detection results, returning zero metrics")
-        metrics = {
-            'bbox_mAP': 0.0,
-            'bbox_mAP_50': 0.0,
-            'bbox_mAP_75': 0.0,
-            'bbox_mAP_small': 0.0,
-            'bbox_mAP_medium': 0.0,
-            'bbox_mAP_large': 0.0
+        
+    except Exception as e:
+        logger.error(f"Evaluation failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return {
+            'bbox_mAP': 0.0, 'bbox_mAP_50': 0.0, 'bbox_mAP_75': 0.0,
+            'bbox_mAP_small': 0.0, 'bbox_mAP_medium': 0.0, 'bbox_mAP_large': 0.0
         }
-    
-    return metrics
 
 
 def print_evaluation_summary(
