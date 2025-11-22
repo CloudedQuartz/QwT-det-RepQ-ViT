@@ -1,0 +1,52 @@
+# Large directories that users should download/clone themselves
+mmdet_repo/
+
+# Model checkpoints (large files, users download their own)
+checkpoints/
+*.pth
+
+# Output files from calibration
+outputs/
+plots/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Virtual environments
+.venv/
+venv/
+.venv_*/
+venv_*/
+ENV/
+env/
+
+# Dataset (too large for Git)
+data/coco*/
+*.jpg
+*.png
+*.json
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Jupyter Notebooks
+.ipynb_checkpoints/
+*.ipynb
+
+# Logs
+*.log
+
+# Temporary files
+*.tmp
+*.bak

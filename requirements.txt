@@ -1,0 +1,12 @@
+torch>=2.5.0
+torchvision>=0.20.0
+mmdet==3.3.0
+mmcv==2.1.0
+mmengine>=0.10.1
+pycocotools>=2.0.7
+opencv-python>=4.8.0
+numpy>=1.24.0
+tqdm>=4.66.0
+scipy>=1.11.0
+matplotlib>=3.8.0
+timm>=0.9.0
