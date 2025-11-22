@@ -282,10 +282,10 @@ QwT (Quantization without Tears) reduces quantization error through learned line
 Example results on Swin-T Mask R-CNN 3x (100 samples):
 
 ```
-Baseline (FP32):        box_mAP = 0.460
-Quantized (W4/A4):      box_mAP = 0.361
-QwT Compensated:        box_mAP = 0.363
-QwT Improvement:        +0.002 mAP
+Baseline (FP32):        box_mAP = 0.453
+Quantized (W4/A4):      box_mAP = 0.417
+QwT Compensated:        box_mAP = 0.422
+QwT Improvement:        +0.006 mAP
 ```
 
 With 512 calibration samples, improvements are typically larger (+0.005-0.010 mAP).
@@ -386,8 +386,6 @@ print(f"QwT mAP: {metrics['bbox_mAP']:.3f}")
 - **Intel XPU (Arc/Flex/Max GPUs)**: Not supported due to MMCV C++ operator limitations
 - **AMD GPUs (ROCm)**: Not supported by MMCV
 - **Apple Silicon (M1/M2/M3)**: Limited support (CPU mode only, MPS not supported by MMCV)
-
-## Troubleshooting
 
 - **QwT Paper**: [Quantization without Tears](https://arxiv.org/abs/2106.08295)
 - **MMDetection**: [open-mmlab/mmdetection](https://github.com/open-mmlab/mmdetection)
