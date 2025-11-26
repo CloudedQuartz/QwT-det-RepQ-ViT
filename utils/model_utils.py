@@ -197,12 +197,16 @@ def evaluate_mmdet_model(
                     # Filter results for this image
                     img_results = [r for r in results if r['image_id'] == img_id]
 
-                    visualizer.plot_detections(
-                        img_tensor,
-                        img_results,
-                        phase=phase,
-                        image_id=img_id
+                    visualizer.add_datasample(
+                        name=f"{phase}_{img_id}",
+                        image=img,
+                        data_sample=output,
+                        draw_gt=False,
+                        draw_pred=True,
+                        show=False,
+                        pred_score_thr=0.3
                     )
+
                 except Exception as e:
                     logger.warning(f"Failed to visualize detections for {img_id}: {e}")
         

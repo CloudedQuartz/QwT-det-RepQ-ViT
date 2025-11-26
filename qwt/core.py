@@ -15,7 +15,8 @@ import torch.distributed as dist
 from tqdm import tqdm
 
 from .compensation import CompensationBlock
-from .visualization import Visualizer
+from .visualization import plot_weight_heatmap, plot_error_distribution
+
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -179,10 +180,9 @@ def generate_compensation_model(
     r2_scores = []
     global_block_id = 0
 
-    # Initialize visualizer
-    visualizer = Visualizer(output_dir)
     
     q_model.eval()
+
     q_model.to(device)
     
     # Step 1: Extract features from patch embedding
@@ -414,11 +414,13 @@ def generate_compensation_model(
             r2_scores.append(r2_score)
 
             # Visualize weights
-            visualizer.plot_weight_heatmap(
+            plot_weight_heatmap(
                 W_comp,
                 block_id=global_block_id,
+                output_dir=output_dir,
                 layer_id=layer_id
             )
+
             
             # Replace block with CompensationBlock
             comp_block = CompensationBlock(
@@ -509,12 +511,14 @@ def generate_compensation_model(
 
             # Visualize error distribution (only if we have data)
             if error_before_vis is not None and error_after_vis is not None:
-                visualizer.plot_error_distribution(
+                plot_error_distribution(
                     error_before_vis,
                     error_after_vis,
                     block_id=global_block_id,
+                    output_dir=output_dir,
                     layer_id=layer_id
                 )
+
             
             output_previous = output_previous_list
             global_block_id += 1
@@ -527,7 +531,9 @@ def generate_compensation_model(
     logger.info("Compensation model generation finished")
     
     # Visualize calibration metrics
-    visualizer.plot_calibration_metrics(losses)
-    visualizer.plot_r2_scores(r2_scores)
+    from .visualization import plot_calibration_metrics, plot_r2_scores
+    plot_calibration_metrics(losses, output_dir)
+    plot_r2_scores(r2_scores, output_dir)
     
     return q_model, losses
+

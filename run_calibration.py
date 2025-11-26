@@ -28,11 +28,12 @@ from typing import Optional, Dict, Generator
 import torch
 from mmengine.config import Config
 from mmengine.runner import Runner
+from mmengine.visualization import Visualizer
 
 from config import QwTConfig
 from quantization import quant_model, set_quant_state
 from qwt import generate_compensation_model
-from qwt.visualization import Visualizer
+from qwt.visualization import plot_map_comparison
 from utils import (
     evaluate_mmdet_model,
     load_warmup_state,
@@ -225,17 +226,28 @@ def build_runner(args: argparse.Namespace, indices: list = None) -> Runner:
     # Suppress verbose logs
     cfg.log_level = 'WARNING'
     
+    # Configure visualizer to use DetLocalVisualizer and save to output_dir
+    # We use the default 'visualizer' name so MMDetection finds it
+    # Check if visualizer already exists to avoid "instance already created" warning
+    if 'visualizer' in Visualizer._instance_dict:
+        cfg.visualizer = None
+    else:
+        cfg.visualizer = dict(
+            type='DetLocalVisualizer',
+            vis_backends=[dict(type='LocalVisBackend')],
+            name='visualizer',
+            save_dir=args.output_dir
+        )
+    
     # Build runner
     runner = Runner.from_cfg(cfg)
+
     
     # Explicitly load checkpoint to ensure it's loaded before we start
     if args.checkpoint:
         runner.load_checkpoint(args.checkpoint)
         
     return runner
-
-
-
 
 
 def run_evaluation(
@@ -303,9 +315,6 @@ def main():
     calibration_indices = random.sample(all_indices, min(config.calibration_samples, total_images))
     eval_indices = random.sample(all_indices, min(config.eval_samples, total_images))
     
-    # Initialize visualizer
-    visualizer = Visualizer(config.output_dir)
-    
     # Step 1: Build Runner and Load Model (using evaluation indices for initial build)
     logger.info("Step 1: Building MMDetection Runner...")
     
@@ -319,6 +328,9 @@ def main():
     model.to(config.device)
     model.eval()
     logger.info("✓ Runner built and model loaded\n")
+    
+    # Get the visualizer instance created by the runner
+    visualizer = Visualizer.get_current_instance()
     
     # Step 2: Baseline evaluation
     baseline_metrics = run_evaluation(
@@ -455,10 +467,11 @@ def main():
         print_evaluation_summary(baseline_metrics, quantized_metrics, qwt_metrics)
         
         # Visualize mAP comparison
-        visualizer.plot_map_comparison(
+        plot_map_comparison(
             baseline_metrics['bbox_mAP'],
             quantized_metrics['bbox_mAP'],
-            qwt_metrics['bbox_mAP']
+            qwt_metrics['bbox_mAP'],
+            output_dir=config.output_dir
         )
     
     logger.info("="*70)
