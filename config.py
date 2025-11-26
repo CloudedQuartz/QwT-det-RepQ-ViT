@@ -49,6 +49,7 @@ class QwTConfig:
     
     # Dataset Configuration
     coco_root: str
+    warmup_samples: int = 512
     calibration_samples: int = 512
     eval_samples: int = 100
     

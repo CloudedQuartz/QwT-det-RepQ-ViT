@@ -46,7 +46,7 @@ def save_warmup_state(
     model: nn.Module,
     save_path: str
 ) -> None:
-    """Save warmup state (quantization observer parameters).
+    """Save warmup state (quantization observer parameters only).
     
     Args:
         model: Model with initialized quantization observers
@@ -57,10 +57,18 @@ def save_warmup_state(
     # Create directory if needed
     Path(save_path).parent.mkdir(parents=True, exist_ok=True)
     
-    # Save state dict (includes quantization buffers)
-    torch.save(model.state_dict(), save_path)
+    # Extract only quantization observer parameters (delta, zero_point, inited)
+    # This excludes model weights and compensation parameters
+    full_state_dict = model.state_dict()
+    warmup_state_dict = {
+        k: v for k, v in full_state_dict.items()
+        if 'delta' in k or 'zero_point' in k or 'inited' in k
+    }
     
-    logger.info("Warmup state saved successfully")
+    # Save only warmup parameters
+    torch.save(warmup_state_dict, save_path)
+    
+    logger.info(f"Warmup state saved successfully ({len(warmup_state_dict)} parameters)")
 
 
 def load_warmup_state(
@@ -80,19 +88,13 @@ def load_warmup_state(
     """
     logger.info(f"Loading warmup state from {load_path}")
     
-    # Load state dict
+    # Load state dict (should only contain quantization observer parameters)
     state_dict = torch.load(load_path, map_location=device, weights_only=False)
     
-    # Filter to only load quantization buffers (delta, zero_point, inited)
-    # Exclude compensation parameters (comp_weight, comp_bias) to avoid conflicts
-    quant_state_dict = {
-        k: v for k, v in state_dict.items() 
-        if 'delta' in k or 'zero_point' in k or 'inited' in k
-    }
+    # Load into model (strict=False allows partial loading)
+    model.load_state_dict(state_dict, strict=False)
     
-    model.load_state_dict(quant_state_dict, strict=False)
-    
-    logger.info("Warmup state loaded successfully")
+    logger.info(f"Warmup state loaded successfully ({len(state_dict)} parameters)")
     return model
 
 
@@ -150,14 +152,6 @@ def evaluate_mmdet_model(
     results = []
     img_ids = []
     count = 0
-    
-    # Get the COCO API from the evaluator
-    # We need to ensure the evaluator is initialized
-    if not hasattr(runner.test_evaluator.metrics[0], '_coco_api'):
-        runner.test_evaluator.metrics[0].dataset_meta = runner.test_dataloader.dataset.metainfo
-        # Trigger lazy init if needed, or manually load
-        # For now, assume it's initialized or we can access it via the dataset
-        pass
         
     # Iterate through dataloader
     for data_batch in tqdm(runner.test_dataloader, desc="Evaluating", total=num_samples):
@@ -218,6 +212,8 @@ def evaluate_mmdet_model(
             
     # If no results, return 0
     if not results:
+        logger.warning(f"No detection results found after processing {count} images! "
+                      "Model may be broken or confidence threshold is too high.")
         return {
             'bbox_mAP': 0.0, 'bbox_mAP_50': 0.0, 'bbox_mAP_75': 0.0,
             'bbox_mAP_small': 0.0, 'bbox_mAP_medium': 0.0, 'bbox_mAP_large': 0.0

@@ -77,10 +77,16 @@ def parse_args() -> argparse.Namespace:
         help='Path to COCO dataset root directory'
     )
     parser.add_argument(
+        '--warmup-samples',
+        type=int,
+        default=512,
+        help='Number of samples for quantization warmup (default: 512)'
+    )
+    parser.add_argument(
         '--calibration-samples',
         type=int,
         default=512,
-        help='Number of samples for calibration (default: 512)'
+        help='Number of samples for QwT calibration/compensation (default: 512)'
     )
     parser.add_argument(
         '--eval-samples',
@@ -167,8 +173,13 @@ def parse_args() -> argparse.Namespace:
     return args
 
 
-def build_runner(args: argparse.Namespace) -> Runner:
-    """Build MMDetection Runner from config."""
+def build_runner(args: argparse.Namespace, indices: list = None) -> Runner:
+    """Build MMDetection Runner from config.
+    
+    Args:
+        args: Command line arguments
+        indices: Optional list of dataset indices to use (for sampling control)
+    """
     cfg = Config.fromfile(args.config)
     
     # Update data root
@@ -180,8 +191,12 @@ def build_runner(args: argparse.Namespace) -> Runner:
         cfg.test_dataloader.dataset.ann_file = 'annotations/instances_val2017.json'
         cfg.test_dataloader.dataset.data_prefix = dict(img='val2017/')
         
-        # Limit to eval_samples by using indices
-        cfg.test_dataloader.dataset.indices = list(range(args.eval_samples))
+        # Use provided indices or default to eval_samples
+        if indices is not None:
+            cfg.test_dataloader.dataset.indices = indices
+            logger.info(f"Using {len(indices)} specified dataset indices")
+        else:
+            cfg.test_dataloader.dataset.indices = list(range(args.eval_samples))
         
         # Update batch size
         cfg.test_dataloader.batch_size = args.batch_size
@@ -253,6 +268,7 @@ def main():
         model_config=args.config,
         checkpoint=args.checkpoint,
         coco_root=args.coco_root,
+        warmup_samples=args.warmup_samples,
         calibration_samples=args.calibration_samples,
         eval_samples=args.eval_samples,
         device=args.device,
@@ -268,15 +284,35 @@ def main():
     logger.info("QwT Calibration Pipeline - MMDetection")
     logger.info("="*70)
     
+    # Random sampling strategy
+    # Note: This allows potential overlap between sets (data leakage), but ensures randomness across the entire dataset
+    import random
+    random.seed(42)  # For reproducibility
+    
+    # Assuming COCO val2017 has 5000 images
+    total_images = 5000
+    all_indices = list(range(total_images))
+    
+    logger.info(f"Data sampling strategy (Random Sampling):")
+    logger.info(f"  Warmup: {config.warmup_samples} random samples from full dataset")
+    logger.info(f"  Calibration: {config.calibration_samples} random samples from full dataset")
+    logger.info(f"  Evaluation: {config.eval_samples} random samples from full dataset")
+    
+    # Sample independently for each phase from the full pool
+    warmup_indices = random.sample(all_indices, min(config.warmup_samples, total_images))
+    calibration_indices = random.sample(all_indices, min(config.calibration_samples, total_images))
+    eval_indices = random.sample(all_indices, min(config.eval_samples, total_images))
+    
     # Initialize visualizer
     visualizer = Visualizer(config.output_dir)
-    # Step 1: Build Runner and Load Model
+    
+    # Step 1: Build Runner and Load Model (using evaluation indices for initial build)
     logger.info("Step 1: Building MMDetection Runner...")
     
     # Suppress MMEngine logs
     logging.getLogger('mmengine').setLevel(logging.WARNING)
     
-    runner = build_runner(args)
+    runner = build_runner(args, indices=eval_indices)
     model = runner.model
     model.cfg = runner.cfg
     model.runner = runner  # Attach runner for proper evaluation
@@ -325,28 +361,35 @@ def main():
         if config.warmup_checkpoint:
             logger.warning(f"Warmup checkpoint {config.warmup_checkpoint} not found. Running warmup...")
         
-        logger.info(f"Step 4: Warmup quantization ({config.calibration_samples} samples)...")
+        logger.info(f"Step 4: Warmup quantization ({config.warmup_samples} samples from random subset)...")
         
-        # Warmup - use test_dataloader for calibration
+        # Rebuild runner with warmup indices
+        warmup_runner = build_runner(args, indices=warmup_indices)
+        model.runner = warmup_runner  # Update runner reference
+        
+        # Warmup - use warmup_runner's dataloader
         set_quant_state(q_backbone, input_quant=True, weight_quant=True)
         
         count = 0
-        for data_batch in runner.test_dataloader:
+        for data_batch in warmup_runner.test_dataloader:
             # Preprocess data
             with torch.no_grad():
-                data = runner.model.data_preprocessor(data_batch, training=False)
+                data = warmup_runner.model.data_preprocessor(data_batch, training=False)
             images = data['inputs']
             
             # Run through quantized backbone
             _ = q_backbone(images)
             
             count += images.shape[0]
-            if count >= config.calibration_samples:
+            if count >= config.warmup_samples:
                 break
         
         # Save warmup state
         if config.save_warmup:
             save_warmup_state(q_backbone, warmup_path)
+        
+        # Restore evaluation runner
+        model.runner = runner
         
         logger.info("✓ Warmup complete\n")
     
@@ -363,12 +406,16 @@ def main():
     # Step 6: Generate QwT compensation
     logger.info("Step 6: Generating QwT compensation...")
     
-    # Create calibration data generator using test_dataloader
+    # Rebuild runner with calibration indices
+    logger.info(f"Using {len(calibration_indices)} samples from random subset")
+    calib_runner = build_runner(args, indices=calibration_indices)
+    
+    # Create calibration data generator using calibration runner
     def get_calib_data():
         count = 0
-        for data_batch in runner.test_dataloader:
+        for data_batch in calib_runner.test_dataloader:
             with torch.no_grad():
-                data = runner.model.data_preprocessor(data_batch, training=False)
+                data = calib_runner.model.data_preprocessor(data_batch, training=False)
             images = data['inputs']
             yield images, None
             

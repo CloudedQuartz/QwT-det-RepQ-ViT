@@ -135,7 +135,12 @@ def solve_linear_regression(
     # R² = 1 - SS_res / SS_tot
     SS_res = YtY - 2 * (W_overall.t() @ XtY).trace() + (W_overall.t() @ XtX @ W_overall).trace()
     SS_tot = YtY - (sum_Y * sum_Y).sum() / N
-    r2_score = 1 - SS_res / (SS_tot + 1e-8)
+    
+    # Handle edge case: if SS_tot is very small (no variance in target)
+    if SS_tot < 1e-8:
+        r2_score = 1.0 if SS_res < 1e-8 else 0.0
+    else:
+        r2_score = 1 - SS_res / SS_tot
     
     return W_comp, b, r2_score.item()
 
