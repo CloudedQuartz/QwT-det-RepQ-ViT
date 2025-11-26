@@ -15,6 +15,7 @@ import torch.distributed as dist
 from tqdm import tqdm
 
 from .compensation import CompensationBlock
+from .visualization import Visualizer
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -146,7 +147,8 @@ def generate_compensation_model(
     device: str = 'cuda',
     world_size: int = 1,
     num_samples: int = LINEAR_COMPENSATION_SAMPLES,
-    batch_size: int = 1
+    batch_size: int = 1,
+    output_dir: str = './outputs'
 ) -> Tuple[nn.Module, Dict[str, list]]:
     """Generate QwT compensation model for quantized network.
     
@@ -169,7 +171,11 @@ def generate_compensation_model(
     logger.info("Starting QwT compensation model generation")
     
     losses = {'before': [], 'after': []}
+    r2_scores = []
     global_block_id = 0
+
+    # Initialize visualizer
+    visualizer = Visualizer(output_dir)
     
     q_model.eval()
     q_model.to(device)
@@ -316,6 +322,10 @@ def generate_compensation_model(
             loss_before_accum = 0.0
             total_samples = 0
             
+            # Initialize visualization variables
+            error_before_vis = None
+            error_after_vis = None
+            
             # Pass 1: Accumulate statistics for linear regression
             for i, (t_out, (H, W)) in enumerate(tqdm(feature_loader, desc=f"Block {global_block_id} Stats", leave=False)):
                 t_out = t_out.to(device)
@@ -365,6 +375,10 @@ def generate_compensation_model(
                 # Compute quantization error
                 X = t_out_3d.reshape(-1, C_cur)
                 Y = (full_precision_out - quant_out).reshape(-1, C_cur)
+
+                # Store error for visualization (only for first batch to save memory)
+                if i == 0:
+                    error_before_vis = Y.detach().cpu()
                 
                 # Track loss before compensation
                 loss_before_accum += Y.abs().sum().item()
@@ -392,6 +406,14 @@ def generate_compensation_model(
             
             logger.info(f'    Block {global_block_id}: abs_before={loss_before:.6f}, R²={r2_score:.3f}')
             losses['before'].append(loss_before)
+            r2_scores.append(r2_score)
+
+            # Visualize weights
+            visualizer.plot_weight_heatmap(
+                W_comp,
+                block_id=global_block_id,
+                layer_id=layer_id
+            )
             
             # Replace block with CompensationBlock
             comp_block = CompensationBlock(
@@ -462,6 +484,10 @@ def generate_compensation_model(
                 Y_after = (full_precision_out_after - compensated_out_flat).reshape(-1, C_cur)
                 loss_after_accum += Y_after.abs().sum().item()
                 total_samples_after += Y_after.shape[0]
+
+                # Store error for visualization (only for first batch)
+                if i == 0:
+                    error_after_vis = Y_after.detach().cpu()
                 
                 # Flatten to 3D for next block
                 if len(compensated_out.shape) == 4:
@@ -475,6 +501,15 @@ def generate_compensation_model(
             losses['after'].append(loss_after)
             reduction = (1 - loss_after/loss_before) * 100 if loss_before > 0 else 0
             logger.info(f'    abs_after={loss_after:.6f}, reduction={reduction:.2f}%')
+
+            # Visualize error distribution (only if we have data)
+            if error_before_vis is not None and error_after_vis is not None:
+                visualizer.plot_error_distribution(
+                    error_before_vis,
+                    error_after_vis,
+                    block_id=global_block_id,
+                    layer_id=layer_id
+                )
             
             output_previous = output_previous_list
             global_block_id += 1
@@ -485,4 +520,9 @@ def generate_compensation_model(
                 torch.cuda.empty_cache()
     
     logger.info("Compensation model generation finished")
+    
+    # Visualize calibration metrics
+    visualizer.plot_calibration_metrics(losses)
+    visualizer.plot_r2_scores(r2_scores)
+    
     return q_model, losses

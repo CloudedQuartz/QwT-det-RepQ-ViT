@@ -17,6 +17,7 @@ from pycocotools.cocoeval import COCOeval
 
 from mmdet.apis import init_detector
 from mmengine.runner import Runner
+import mmcv
 
 logger = logging.getLogger(__name__)
 
@@ -116,7 +117,9 @@ def evaluate_mmdet_model(
     model: nn.Module,
     coco_root: str,
     num_samples: int = 100,
-    device: str = 'cpu'
+    device: str = 'cpu',
+    visualizer = None,
+    phase: str = 'eval'
 ) -> Dict[str, float]:
     """Evaluate MMDetection model on COCO dataset using runner.
     
@@ -125,6 +128,8 @@ def evaluate_mmdet_model(
         coco_root: Path to COCO dataset root
         num_samples: Number of samples to evaluate on
         device: Device to run evaluation on
+        visualizer: Visualizer instance
+        phase: Phase name for visualization
     
     Returns:
         Dictionary with evaluation metrics
@@ -187,6 +192,29 @@ def evaluate_mmdet_model(
                     'bbox': [x, y, w, h],
                     'score': scores[i].item()
                 })
+
+            # Visualize detections for this image
+            if visualizer is not None and count < 5:
+                try:
+                    img_path = output.img_path
+                    # Load original image
+                    img = mmcv.imread(img_path)
+                    # Convert BGR to RGB
+                    img = mmcv.imconvert(img, 'bgr', 'rgb')
+                    # Convert to tensor (C, H, W)
+                    img_tensor = torch.from_numpy(img).permute(2, 0, 1)
+
+                    # Filter results for this image
+                    img_results = [r for r in results if r['image_id'] == img_id]
+
+                    visualizer.plot_detections(
+                        img_tensor,
+                        img_results,
+                        phase=phase,
+                        image_id=img_id
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to visualize detections for {img_id}: {e}")
         
         count += len(outputs)
         if count >= num_samples:

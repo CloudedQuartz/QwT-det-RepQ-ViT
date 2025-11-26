@@ -32,6 +32,7 @@ from mmengine.runner import Runner
 from config import QwTConfig
 from quantization import quant_model, set_quant_state
 from qwt import generate_compensation_model
+from qwt.visualization import Visualizer
 from utils import (
     evaluate_mmdet_model,
     load_warmup_state,
@@ -226,7 +227,9 @@ def run_evaluation(
     step_name: str,
     model: torch.nn.Module,
     config: QwTConfig,
-    skip: bool = False
+    skip: bool = False,
+    visualizer: Optional[Visualizer] = None,
+    phase: str = 'eval'
 ) -> Optional[Dict[str, float]]:
     """Helper function to run evaluation and log results."""
     if skip:
@@ -235,7 +238,8 @@ def run_evaluation(
         
     logger.info(f"{step_name}: Evaluating...")
     metrics = evaluate_mmdet_model(
-        model, config.coco_root, config.eval_samples, config.device
+        model, config.coco_root, config.eval_samples, config.device,
+        visualizer=visualizer, phase=phase
     )
     logger.info(f"✓ {step_name} box mAP: {metrics['bbox_mAP']:.3f}\n")
     return metrics
@@ -263,6 +267,9 @@ def main():
     logger.info("="*70)
     logger.info("QwT Calibration Pipeline - MMDetection")
     logger.info("="*70)
+    
+    # Initialize visualizer
+    visualizer = Visualizer(config.output_dir)
     # Step 1: Build Runner and Load Model
     logger.info("Step 1: Building MMDetection Runner...")
     
@@ -282,7 +289,9 @@ def main():
         "Step 2: Baseline Evaluation (FP32)",
         model,
         config,
-        skip=args.skip_baseline
+        skip=args.skip_baseline,
+        visualizer=visualizer,
+        phase='baseline'
     )
     
     # Step 3: Quantize model
@@ -346,7 +355,9 @@ def main():
         "Step 5: Quantized Evaluation (No Compensation)",
         model,
         config,
-        skip=args.skip_quantized_eval
+        skip=args.skip_quantized_eval,
+        visualizer=visualizer,
+        phase='quantized'
     )
     
     # Step 6: Generate QwT compensation
@@ -371,7 +382,8 @@ def main():
         q_backbone,
         calib_loader,
         device=config.device,
-        num_samples=config.calibration_samples
+        num_samples=config.calibration_samples,
+        output_dir=config.output_dir
     )
     
     model.backbone = compensated_backbone
@@ -385,12 +397,21 @@ def main():
         "Step 7: QwT Compensated Evaluation",
         model,
         config,
-        skip=False # Always evaluate final model
+        skip=False, # Always evaluate final model
+        visualizer=visualizer,
+        phase='compensated'
     )
     
     # Print summary
     if baseline_metrics and quantized_metrics and qwt_metrics:
         print_evaluation_summary(baseline_metrics, quantized_metrics, qwt_metrics)
+        
+        # Visualize mAP comparison
+        visualizer.plot_map_comparison(
+            baseline_metrics['bbox_mAP'],
+            quantized_metrics['bbox_mAP'],
+            qwt_metrics['bbox_mAP']
+        )
     
     logger.info("="*70)
     logger.info("QwT Calibration Complete!")
