@@ -81,7 +81,15 @@ def load_warmup_state(
     
     # Load state dict
     state_dict = torch.load(load_path, map_location=device, weights_only=False)
-    model.load_state_dict(state_dict, strict=False)
+    
+    # Filter to only load quantization buffers (delta, zero_point, inited)
+    # This avoids overwriting model weights which might cause issues
+    quant_state_dict = {
+        k: v for k, v in state_dict.items() 
+        if 'delta' in k or 'zero_point' in k or 'inited' in k
+    }
+    
+    model.load_state_dict(quant_state_dict, strict=False)
     
     logger.info("Warmup state loaded successfully")
     return model
