@@ -126,7 +126,7 @@ The config files for various models are needed from the MMDetection repository:
 git clone https://github.com/open-mmlab/mmdetection.git mmdet_repo
 ```
 
-This will create an `mmdet_repo` directory containing all model configs (e.g., `mmdet_repo/configs/swin/mask-rcnn_swin-t-p4-w7_fpn_1x_coco.py`).
+This will create an `mmdet_repo` directory containing all model configs (e.g., `mmdet_repo/configs/swin/mask_rcnn_swin_t_p4_w7_fpn_ms_crop_3x_coco.py`).
 
 ### Step 6: Download COCO Dataset
 

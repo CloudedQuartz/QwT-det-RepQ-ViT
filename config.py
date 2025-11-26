@@ -21,6 +21,7 @@ class QwTConfig:
         
         # Dataset Configuration
         coco_root: Path to COCO dataset root directory
+        warmup_samples: Number of samples for quantization warmup
         calibration_samples: Number of samples for QwT calibration
         eval_samples: Number of samples for evaluation
         
