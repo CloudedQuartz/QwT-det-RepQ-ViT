@@ -159,13 +159,15 @@ python run_calibration.py \
     --batch-size 1
 ```
 
-### Example: Swin-T Mask R-CNN
+### Example: Swin Transformer Tiny with Mask R-CNN (3x Schedule)
+
+**Model**: Swin-T (Tiny) backbone with Mask R-CNN detector, trained with multi-scale crop augmentation for 3x schedule (36 epochs)
 
 ```bash
 # Download config and checkpoint
 mkdir -p checkpoints
 cd checkpoints
-# Download the 3x model (46.0 mAP baseline - MMDetection 3.x compatible)
+# Download the 3x model (46.0 box mAP, 41.6 mask mAP - MMDetection 3.x compatible)
 # For Windows PowerShell:
 Invoke-WebRequest -Uri "https://download.openmmlab.com/mmdetection/v2.0/swin/mask_rcnn_swin-t-p4-w7_fpn_ms-crop-3x_coco/mask_rcnn_swin-t-p4-w7_fpn_ms-crop-3x_coco_20210906_131725-bacf6f7b.pth" -OutFile "mask_rcnn_swin-t-p4-w7_fpn_ms-crop-3x_coco.pth"
 # For Linux/Mac:
@@ -174,7 +176,7 @@ cd ..
 
 # Run calibration
 python run_calibration.py \
-    --config mmdet_repo/configs/swin/mask-rcnn_swin-t-p4-w7_fpn_ms-crop-3x_coco.py \
+    --config mmdet_repo/configs/swin/mask_rcnn_swin_t_p4_w7_fpn_ms_crop_3x_coco.py \
     --checkpoint checkpoints/mask_rcnn_swin-t-p4-w7_fpn_ms-crop-3x_coco.pth \
     --coco-root C:/data/coco2017 \
     --calibration-samples 512 \
@@ -187,7 +189,7 @@ python run_calibration.py \
 
 ```bash
 python run_calibration.py \
-    --config mmdet_repo/configs/swin/mask-rcnn_swin-t-p4-w7_fpn_ms-crop-3x_coco.py \
+    --config mmdet_repo/configs/swin/mask_rcnn_swin_t_p4_w7_fpn_ms_crop_3x_coco.py \
     --checkpoint checkpoints/mask_rcnn_swin-t-p4-w7_fpn_ms-crop-3x_coco.pth \
     --coco-root C:/data/coco2017 \
     --calibration-samples 512 \
@@ -204,7 +206,7 @@ After the first run, warmup state is saved to `outputs/mask_rcnn_swin_t_3x_warmu
 
 ```bash
 python run_calibration.py \
-    --config mmdet_repo/configs/swin/mask-rcnn_swin-t-p4-w7_fpn_ms-crop-3x_coco.py \
+    --config mmdet_repo/configs/swin/mask_rcnn_swin_t_p4_w7_fpn_ms_crop_3x_coco.py \
     --checkpoint checkpoints/mask_rcnn_swin-t-p4-w7_fpn_ms-crop-3x_coco.pth \
     --coco-root path/to/coco2017 \
     --warmup-checkpoint outputs/mask_rcnn_swin_t_3x_warmup.pth \
