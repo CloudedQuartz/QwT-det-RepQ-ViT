@@ -10,6 +10,7 @@ A clean, modular implementation of **QwT (Quantization without Tears)** for MMDe
 - ✅ **Warmup State Persistence**: Save/load quantization observer state for fast re-runs
 - ✅ **MMDetection Compatible**: Works with MMDetection 3.x models (Swin, ResNet, etc.)
 - ✅ **Comprehensive Logging**: Detailed progress tracking and metrics
+- ✅ **Visualization**: Automatic generation of error distributions, calibration metrics, R² scores, and mAP comparisons
 
 ## Installation
 
@@ -221,9 +222,10 @@ Model Configuration:
   --checkpoint PATH      Path to model checkpoint
 
 Dataset Configuration:
-  --coco-root PATH       Path to COCO dataset root
-  --calibration-samples N  Number of calibration samples (default: 512)
-  --eval-samples N       Number of evaluation samples (default: 100)
+  --coco-root PATH         Path to COCO dataset root
+  --warmup-samples N       Number of samples for quantization warmup (default: 512)
+  --calibration-samples N  Number of samples for QwT calibration/compensation (default: 512)
+  --eval-samples N         Number of evaluation samples (default: 100)
 
 Device Configuration:
   --device {cpu,cuda}    Device to use (default: cpu)
@@ -251,13 +253,12 @@ mmdet_qwt/
 ├── config.py              # Configuration dataclass
 ├── qwt/
 │   ├── core.py           # Main QwT compensation logic
-│   └── compensation.py   # CompensationBlock class
+│   ├── compensation.py   # CompensationBlock class
+│   └── visualization.py  # Visualization utilities
 ├── quantization/
 │   ├── quantizer.py      # Quantizer classes
 │   ├── quant_modules.py  # Quantized layers
 │   └── quant_model.py    # Model quantization
-├── data/
-│   └── loader.py         # COCO data loaders
 ├── utils/
 │   └── model_utils.py    # Model loading/saving/evaluation
 ├── run_calibration.py    # Main CLI script
@@ -276,6 +277,7 @@ QwT (Quantization without Tears) reduces quantization error through learned line
    - Fit linear regression: `Y = W * input + b`
    - Wrap block with compensation: `output = quantized_block(x) + W*x + b`
 4. **Evaluate**: Compensated model recovers significant accuracy
+5. **Visualize**: Automatically generate plots showing error distributions, calibration metrics, and performance comparisons
 
 ## Results
 
@@ -289,6 +291,23 @@ QwT Improvement:        +0.006 mAP
 ```
 
 With 512 calibration samples, improvements are typically larger (+0.005-0.010 mAP).
+
+## Visualization Outputs
+
+The calibration script automatically generates visualizations in `outputs/visualizations/`:
+
+### Per-Block Visualizations
+
+- **Error Distribution Histograms** (`error_dist_block_XXX.png`): Shows the distribution of quantization errors before and after compensation for each block, with MSE reduction percentage
+- **Compensation Weight Heatmaps** (`weight_heatmap_block_XXX.png`): Visualizes the learned compensation weights as a heatmap (downsampled for large matrices)
+
+### Global Visualizations
+
+- **Calibration Metrics** (`calibration_metrics.png`): Line plot showing MSE before and after compensation across all blocks (log scale)
+- **R² Scores** (`r2_scores.png`): Shows the quality of linear regression fit for each block (higher is better, range 0-1)
+- **mAP Comparison** (`map_comparison.png`): Bar chart comparing baseline (FP32), quantized (no compensation), and QwT compensated model performance
+
+These visualizations help diagnose which blocks benefit most from compensation and verify that the linear regression is fitting well.
 
 ## Advanced Configuration
 
