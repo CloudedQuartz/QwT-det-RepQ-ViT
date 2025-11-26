@@ -84,7 +84,7 @@ def load_warmup_state(
     state_dict = torch.load(load_path, map_location=device, weights_only=False)
     
     # Filter to only load quantization buffers (delta, zero_point, inited)
-    # This avoids overwriting model weights which might cause issues
+    # Exclude compensation parameters (comp_weight, comp_bias) to avoid conflicts
     quant_state_dict = {
         k: v for k, v in state_dict.items() 
         if 'delta' in k or 'zero_point' in k or 'inited' in k
@@ -181,14 +181,10 @@ def evaluate_mmdet_model(
                 w = x2 - x
                 h = y2 - y
                 
+                # Store label index initially, will convert to category_id later
                 results.append({
                     'image_id': img_id,
-                    'category_id': runner.test_dataloader.dataset.metainfo['classes'][labels[i].item()] if isinstance(labels[i].item(), str) else labels[i].item(), # Handle class mapping if needed, but usually label index matches if dataset is standard
-                    # Actually, MMDetection labels are 0-indexed, COCO category IDs are not contiguous.
-                    # We need to map label index to category ID.
-                    # runner.test_dataloader.dataset.metainfo['classes'] gives class names.
-                    # We need the category ID mapping.
-                    # The dataset object usually has cat_ids.
+                    'label_idx': labels[i].item(),  # MMDetection outputs 0-indexed label
                     'bbox': [x, y, w, h],
                     'score': scores[i].item()
                 })
@@ -250,16 +246,15 @@ def evaluate_mmdet_model(
              # Let's try to get it from coco_gt
              cat_ids = coco_gt.getCatIds()
              
-        # Update category IDs in results
-        # MMDetection output labels are 0-indexed indices into the classes list
-        # We need to map 0 -> cat_ids[0], 1 -> cat_ids[1], etc.
+        # Map label indices to COCO category IDs
+        # MMDetection outputs 0-indexed labels, COCO uses non-contiguous category IDs
         for res in results:
-            label_idx = res['category_id'] # This was the label index
+            label_idx = res.pop('label_idx')  # Remove label_idx key
             if label_idx < len(cat_ids):
-                res['category_id'] = cat_ids[label_idx]
+                res['category_id'] = cat_ids[label_idx]  # Add proper category_id
             else:
-                # Fallback or error
-                pass
+                logger.warning(f"Label index {label_idx} out of range (max {len(cat_ids)-1}), using index as category_id")
+                res['category_id'] = label_idx  # Fallback
 
         # Load results into COCO
         coco_dt = coco_gt.loadRes(results)

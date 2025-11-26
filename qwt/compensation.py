@@ -51,20 +51,20 @@ class CompensationBlock(nn.Module):
         self.r2_score = r2_score
         
         # Register compensation parameters
-        self.register_parameter('lora_weight', nn.Parameter(W.clone()))
-        self.register_parameter('lora_bias', nn.Parameter(b.clone()))
+        self.register_parameter('comp_weight', nn.Parameter(W.clone()))
+        self.register_parameter('comp_bias', nn.Parameter(b.clone()))
         
         # Initialize compensation parameters
         if linear_init and (r2_score > 0):
-            self.lora_weight.data.copy_(W)
-            self.lora_bias.data.copy_(b)
+            self.comp_weight.data.copy_(W)
+            self.comp_bias.data.copy_(b)
             if local_rank == 0:
                 logger.info(f'Block {block_id} using linear init (R²={r2_score:.3f})')
         else:
-            nn.init.zeros_(self.lora_weight)
-            nn.init.zeros_(self.lora_bias)
+            nn.init.zeros_(self.comp_weight)
+            nn.init.zeros_(self.comp_bias)
             if local_rank == 0:
-                logger.info(f'Block {block_id} using lora init (R²={r2_score:.3f})')
+                logger.info(f'Block {block_id} using zero init (R²={r2_score:.3f})')
     
     def forward(
         self,
@@ -90,8 +90,8 @@ class CompensationBlock(nn.Module):
             out = self.block(x)
         
         # Apply linear compensation
-        # out = out + x @ lora_weight + lora_bias
-        compensation = x @ self.lora_weight + self.lora_bias
+        # out = out + x @ comp_weight + comp_bias
+        compensation = x @ self.comp_weight + self.comp_bias
         out = out + compensation
         
         return out
@@ -100,6 +100,6 @@ class CompensationBlock(nn.Module):
         return (
             f"CompensationBlock(block_id={self.block_id}, "
             f"r2_score={self.r2_score:.3f}, "
-            f"weight_shape={tuple(self.lora_weight.shape)}"
+            f"weight_shape={tuple(self.comp_weight.shape)}"
             f")"
         )

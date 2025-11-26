@@ -383,6 +383,7 @@ def main():
         calib_loader,
         device=config.device,
         num_samples=config.calibration_samples,
+        batch_size=config.batch_size,
         output_dir=config.output_dir
     )
     
